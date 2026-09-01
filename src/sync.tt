@@ -1,0 +1,74 @@
+/**
+ * 가짜 서버 동기화 — async 흐름과 tt 구문의 조합을 검증합니다:
+ * match 스크루티니의 await, 가드의 await, arm 본문의 await,
+ * if let 본문의 await, Result.fromPromise, is Error 패턴 분류.
+ */
+import type { TOption } from "@tt/std";
+import * as Result from "@tt/std/result";
+
+export variant SyncState {
+  Idle,
+  Syncing(attempt: number),
+  Synced(at: string),
+  Failed(reason: string, attempts: number),
+}
+
+export type SyncPort = (payload: string) => Promise<string>;
+
+export const describeSync = (state: SyncState): string =>
+  match (state) {
+    Idle => "동기화 안 함",
+    Syncing(attempt) => `동기화 중… (${attempt}번째 시도)`,
+    Synced(at) => `동기화됨 · ${at}`,
+    Failed(reason, attempts) => `동기화 ${attempts}회 실패: ${reason}`,
+  };
+
+/** 실패 사유 분류 — Promise reject 값은 unknown이므로 is 패턴으로 구분. */
+const classifyFailure = (error: unknown): string =>
+  match (error) {
+    is Error { message } => message,
+    _ => String(error),
+  };
+
+/**
+ * 재시도 동기화. 케이스:
+ * - 첫 시도 성공 → Synced, 대기 없음
+ * - 중간 실패 → wait(다음 시도 번호) 후 재시도 (백오프는 wait 주입으로 결정)
+ * - maxAttempts 모두 실패 → Failed(사유, 시도 횟수)
+ * - reject 값이 Error가 아니어도(문자열 등) 사유 문자열로 강등
+ */
+export const syncWithRetry = async (
+  port: SyncPort,
+  payload: string,
+  maxAttempts: number,
+  wait: (attempt: number) => Promise<void>,
+): Promise<SyncState> => {
+  let attempt = 1;
+  while (attempt <= maxAttempts) {
+    // match 스크루티니 안의 await — 매 반복 평가돼야 한다.
+    const outcome: SyncState = match (await Result.fromPromise(port(payload))) {
+      Ok(value) => SyncState.Synced(value),
+      Err(error) if attempt < maxAttempts => SyncState.Syncing(attempt + 1),
+      Err(error) => SyncState.Failed(classifyFailure(error), attempt),
+    };
+    if let Syncing(attempt: next) = outcome {
+      await wait(next); // if let 본문 안의 await
+      attempt = next;
+    } else {
+      return outcome;
+    }
+  }
+  return SyncState.Failed("시도 없이 종료", 0);
+};
+
+/** 가드 안의 await — 검증이 통과한 캐시만 쓰고, 아니면 폐기. */
+export const cachedOrFetch = async (
+  cached: TOption<number>,
+  stillValid: (value: number) => Promise<boolean>,
+  fetchFresh: () => Promise<number>,
+): Promise<number> =>
+  match (cached) {
+    Some(value: v) if await stillValid(v) => v,
+    Some => await fetchFresh(), // arm 본문 안의 await
+    None => await fetchFresh(),
+  };

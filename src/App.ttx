@@ -32,6 +32,22 @@ import {
   loadTodos,
   saveTodos,
 } from "./storage.tt";
+import {
+  SyncState,
+  describeSync,
+  syncWithRetry,
+  type SyncPort,
+} from "./sync.tt";
+
+/** 가짜 서버 — 250ms 지연 후 저장 시각을 돌려줍니다. */
+const fakeServer: SyncPort = async (payload) => {
+  await new Promise<void>((resolve) => setTimeout(resolve, 250));
+  const count = JSON.parse(payload) as number;
+  return `${count}개 · ${new Date().toLocaleTimeString("ko-KR")}`;
+};
+
+const backoff = (attempt: number): Promise<void> =>
+  new Promise<void>((resolve) => setTimeout(resolve, 150 * attempt));
 
 val const FILTERS: readonly Filter[] = [
   Filter.All,
@@ -91,6 +107,14 @@ export default function App() {
   const [error, setError] = useState<TOption<TodoError>>(Option.None);
   const [saveNotice, setSaveNotice] = useState<TOption<string>>(Option.None);
   const [externalChange, setExternalChange] = useState(false);
+  const [sync, setSync] = useState<SyncState>(SyncState.Idle);
+
+  const syncNow = async () => {
+    setSync(SyncState.Syncing(1));
+    setSync(
+      await syncWithRetry(fakeServer, JSON.stringify(todos.length), 3, backoff),
+    );
+  };
 
   useEffect(() => {
     if (saveBlocked) { return; }
@@ -220,6 +244,12 @@ export default function App() {
     Some(value: last) => describeAction(last),
     None => "되돌릴 변경이 없어요",
   };
+  const syncBusy = sync.kind === "Syncing";
+  const syncView = match (sync) {
+    Idle => null,
+    Failed => <span className="sync fail">{describeSync(sync)}</span>,
+    _ => <span className="sync">{describeSync(sync)}</span>,
+  };
 
   const rows = shown.map((todo) => {
     const badge = match (dueBadge(dueStatusOf(todo, today))) {
@@ -267,16 +297,27 @@ export default function App() {
     <main className="app">
       <header className="top">
         <h1>tt todo</h1>
-        <button
-          type="button"
-          className="undo"
-          onClick={undoLast}
-          disabled={history.length === 0}
-          title={undoTitle}
-        >
-          ↩ {undoTitle}
-        </button>
+        <span className="header-actions">
+          <button
+            type="button"
+            className="undo"
+            onClick={syncNow}
+            disabled={syncBusy}
+          >
+            ⇅ 동기화
+          </button>
+          <button
+            type="button"
+            className="undo"
+            onClick={undoLast}
+            disabled={history.length === 0}
+            title={undoTitle}
+          >
+            ↩ {undoTitle}
+          </button>
+        </span>
       </header>
+      {syncView}
       <p className="tagline">
         <code>variant</code> · <code>match</code> · <code>try</code> ·{" "}
         <code>result</code> · <code>|&gt;</code> · <code>flow</code>로 만든 투두 앱

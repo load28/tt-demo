@@ -12,6 +12,9 @@
 | 3 | `result` 블록의 `return [];` → 빈 배열이 문맥 타입을 잃고 `any[]` (ts7005/7034) | strict에서 타입 검사 실패 — 오탐(코드는 건전함) | `[] as readonly T[]`로 단언 |
 | 4 | `result` 블록 안의 match 표현식 → 로워링 이중 방출 + 파싱 불가 TS | 빌드 실패 — 자가 검증(verify-failed)이 잡아줌 | match를 블록 밖 헬퍼 함수로 추출 |
 | 5 | 블록 arm의 중괄호 없는 `if (c) return v;` → `break`가 if 밖으로 샘 | **조용한 의미 오컴파일** — 유효한 TS라 검증 통과, 런타임에 `undefined` | if 본문에 반드시 중괄호 |
+| 6 | result 블록 안에서 값 형태 `try`를 식에 내장(`f(try g() * 1.1)`, `try (파이프라인)`) → ICE 또는 파싱 불가 TS | 빌드 실패 (SourceReordered ICE / verify-failed) | try를 const로 먼저 뽑기 |
+| 7 | result 블록을 `\|>` 파이프라인 헤드로 사용 → 성공 `return`이 함수 return으로 방출 | **조용한 의미 오컴파일** — 타입이 우연히 맞으면 무증상 | 파이프 대신 함수 인자/문 위치로 |
+| 8 | match 리터럴 arm 값이 반환 문맥 타입을 못 받아 string으로 widen | strict에서 타입 검사 실패 — 오탐(#3과 같은 뿌리) | arm 값에 `as const` |
 
 ---
 
@@ -355,6 +358,136 @@ passthrough라 무관).
 
 ---
 
+## 6. result 블록 안의 값 형태 `try` 내장 — ICE 또는 파싱 불가 TS
+
+값 형태 try를 result 블록 안에서 **더 큰 식에 내장**하면 깨진다. 두 증상:
+
+**(a) 식 내장 → ICE (SourceReordered).** 일반 함수에서는 정상인 코드가
+result 블록에서만 크래시.
+
+```tt
+// 일반 함수: 정상
+export const ok = (): TResult<number, string> => {
+  return Result.Ok(Math.round(try t() * 1.1));
+};
+
+// result 블록: ICE
+export const bad = (): TResult<number, string> => result {
+  return Math.round(try t() * 1.1);
+};
+```
+
+```
+error: internal compiler error: validate_source_preservation broke the contract
+that source spans reach the target in source order unless a relocation says
+otherwise (SourceReordered)
+```
+
+**(b) try (파이프라인) → verify-failed.** 역시 일반 함수에서는 정상.
+
+```tt
+export const bad2 = (): TResult<string, string> => result {
+  const v = try (t() |> Result.mapP((n: number) => n.toFixed(1)));  // verify-failed
+  return v;
+};
+```
+
+최상위 형태(`const v = try g();`, `return try (cond ? a() : b());`)는
+result 블록 안에서도 정상이다 — 내장/합성만 깨진다.
+
+### 우회
+
+result 블록 안에서는 try를 항상 **문장 하나로** 뽑고, 가공은 다음 문장에서.
+
+```tt
+const halved = try half(n);
+return Math.round(halved * 1.1);
+```
+
+적용 위치: `src/lab.tt`의 `computeBudget` / `normalizedBudgetBlock`
+(일반 함수 대조군: `computeBudgetFn` / `normalizedBudget`).
+
+---
+
+## 7. result 블록을 파이프라인 헤드로 쓰면 성공 `return`이 함수 return으로 샘
+
+`result { ... } |> step` 형태에서 블록의 성공 `return v;`가 `Ok(v)`로 블록을
+완료하는 대신 **바깥 함수의 실제 return으로 그대로 방출**된다. 실패 경로만
+파이프에 연결되고, 성공하면 파이프 전체를 건너뛰고 함수가 조기 종료한다.
+반환 타입이 우연히 맞으면 아무 진단 없이 틀린 값이 나온다.
+
+### 재현
+
+```tt
+export const f = (): number => {
+  const total = result {
+    const unit = try t();     // Ok(10)
+    return unit * 2;
+  } |> Result.unwrapOrP(0);
+  return total;
+};
+// 기대: total = 20. 실제: `return unit * 2`가 f의 return으로 방출되어
+// 파이프·total 대입에 도달하지 않는다 (스텝이 값을 바꾸면 결과가 달라짐).
+```
+
+실제 로워링:
+
+```ts
+do {
+  $tt_v0: {
+    const $tt_t0 = t(); if (!("value" in $tt_t0)) { $tt_v0 = $tt_t0; break $tt_v0; } const unit = $tt_t0.value;
+    return unit * 2;                     // ← Ok 래핑 없이 함수 return
+  }
+  $tt_v0 = Result.unwrapOrP(0)($tt_v0);  // 실패 경로만 여기 도달
+  break;
+} while (false);
+```
+
+함수 **인자 위치**와 **템플릿 보간 위치**(파이프 없이)는 올바르게
+`$tt_v = { kind: "Ok", value: ... }`로 로워링된다 — 파이프 헤드 경로만 깨진다.
+
+### 우회
+
+result 블록에 파이프를 붙이지 말고 함수 인자로 감싼다.
+
+```tt
+const total = Result.unwrapOr(result { ... }, 0);
+```
+
+적용 위치: `src/lab.tt`의 `receiptLine`.
+
+---
+
+## 8. match 리터럴 arm 값이 반환 문맥 타입을 못 받음 (#3과 같은 뿌리)
+
+match 로워링의 슬롯(`let $tt_v;`)이 무주석이라, 리터럴 유니언을 반환하는
+함수에서 arm의 문자열 리터럴이 `string`으로 widen되어 ts2322가 난다.
+손으로 쓴 switch/return이라면 반환 타입이 문맥으로 좁혀줄 코드다.
+
+### 재현
+
+```tt
+export type Toggle = "on" | "off";
+
+export const flip = (t: Toggle): Toggle =>
+  match (t) {
+    "on" => "off",   // error[ts2322]: expected `Toggle`, found `string`
+    "off" => "on",
+  };
+```
+
+### 우회
+
+arm 값에 `as const`(또는 `as Toggle`)를 붙여 리터럴 타입을 지킨다.
+
+```tt
+"on" => "off" as const,
+```
+
+적용 위치: `src/lab.tt`의 `flip`.
+
+---
+
 ## 문제 없었던 것들
 
 같은 세션에서 아래는 전부 문서대로 동작했다 (2차 확장에서 검증 범위를 크게 넓힘):
@@ -389,3 +522,22 @@ passthrough라 무관).
   vite 플러그인 경유로 33개 테스트 실행 (이 테스트가 이슈 #5를 잡음)
 - 스키마 v1→v2 마이그레이션·부분 복구·미래 버전 보호·용량 초과 분류·멀티탭
   storage 이벤트까지 케이스 매트릭스 전부 유닛 테스트+e2e로 검증
+
+4차(구문 조합) 라운드 — `src/lab.tt`/`src/sync.tt`가 카나리아, 58개 테스트:
+
+- **제네릭 재귀 variant** — `Tree<T>` 재귀 match, 제네릭 필드를 따라가는 중첩 패턴
+- **값 형태 try** — 일반 함수의 식 내장(`Result.Ok(Math.round(try f() * 1.1))`),
+  괄호 전파(`try (cond ? a() : b())`), `try (파이프라인)` — 모두 일반 함수 한정
+  (result 블록 조합은 이슈 #6)
+- **result 블록 위치** — match arm 블록 안, 함수 인자, 템플릿 보간(파이프 없이),
+  concise arrow 본문 — 파이프 헤드만 이슈 #7
+- **파이프라인 옵셔널 스텝** — `profile |> ?.contact |> ...` 단락 후에도 다음
+  스텝이 undefined로 이어지는 계약
+- **flow + val 조합** — `export val const gradeOf = flow |> ... |> ...`
+- **튜플 match + 가드** — 가드 거짓 시 다음 조합 arm으로 낙하
+- **리터럴 or-패턴 + 가드** — `429 if retried => ...` / `429 => ...` 공존
+- **async 조합** — match 스크루티니의 `await`(루프 안에서 매회 평가), 가드의
+  `await`(단락 평가 유지 — None이면 검증 함수가 호출조차 안 됨), arm 본문·
+  `if let` 본문의 `await`, `Result.fromPromise` 재시도 상태 머신
+- **val 바인딩 → 같은 파일 val 파라미터 전달**, let-else + or-패턴,
+  `if let` + 중첩 패턴(`Ok(value: Some(value: v))`)

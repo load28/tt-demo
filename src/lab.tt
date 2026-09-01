@@ -1,0 +1,182 @@
+/**
+ * 구문 조합 실험실 — tt 구문을 서로 겹쳐 썼을 때의 의미를 lab.test.ts가
+ * 런타임까지 검증합니다. 앱 코드가 아니라 컴파일러 회귀 카나리아입니다.
+ */
+import type { TOption, TResult } from "@tt/std";
+import * as Option from "@tt/std/option";
+import * as Result from "@tt/std/result";
+
+/* 1. 제네릭 재귀 variant + 재귀 match + 중첩 패턴 */
+
+export variant Tree<T> {
+  Leaf(value: T),
+  Node(left: Tree<T>, right: Tree<T>),
+}
+
+export const treeSum = (tree: Tree<number>): number =>
+  match (tree) {
+    Leaf(value) => value,
+    Node(left, right) => treeSum(left) + treeSum(right),
+  };
+
+/** 중첩 패턴이 제네릭 필드 타입(Tree<T>)을 따라가는지. */
+export const leftmostLeafDoubled = (tree: Tree<number>): number =>
+  match (tree) {
+    Leaf(value) => value * 2,
+    Node(left: Leaf(value: v)) => v * 2,
+    Node(left) => leftmostLeafDoubled(left),
+  };
+
+/* 2. try 값 형태 — 더 큰 표현식 안, 조건식 괄호 전파 */
+
+const half = (n: number): TResult<number, string> =>
+  n % 2 === 0 ? Result.Ok(n / 2) : Result.Err("홀수");
+
+export const computeBudget = (n: number): TResult<number, string> => result {
+  // 값 형태 try를 result 블록의 return 식 안에 내장하면 ICE(이슈 #6) —
+  // const로 먼저 뽑는다. 값 형태의 바인딩 규칙 자체((try half(n)) * 1.1)는
+  // 일반 함수 쪽 computeBudgetFn에서 검증.
+  const halved = try half(n);
+  return Math.round(halved * 1.1);
+};
+
+/** 일반 함수(비 result 블록)에서는 내장 값 형태 try가 정상 동작. */
+export const computeBudgetFn = (n: number): TResult<number, string> => {
+  return Result.Ok(Math.round(try half(n) * 1.1));
+};
+
+export const pickEven = (a: number, b: number): TResult<number, string> => result {
+  // 임의 식 전파는 괄호로: try (cond ? x : y)
+  return try (a % 2 === 0 ? half(a) : half(b));
+};
+
+/* 3. 파이프라인: try 헤드, 옵셔널 스텝, flow와 std 커리 스텝 */
+
+// try의 피연산자가 파이프라인인 조합 — result 블록 안에서는 파싱 불가 TS가
+// 생성되므로(이슈 #6과 같은 계열) 일반 함수에서 검증하고,
+export const normalizedBudget = (n: number): TResult<string, string> => {
+  const value = try (half(n) |> Result.mapP((v: number) => v.toFixed(1)));
+  return Result.Ok(value);
+};
+
+// result 블록 안에서는 try와 파이프라인을 두 문장으로 나눈다.
+export const normalizedBudgetBlock = (n: number): TResult<string, string> => result {
+  const halved = try half(n);
+  const value = halved |> ((v: number) => v.toFixed(1));
+  return value;
+};
+
+type Profile = { contact?: { email: string } };
+
+/** 옵셔널 포스트픽스 스텝 — 끊겨도 다음 스텝은 undefined로 호출됨. */
+export const emailOf = (profile: Profile | null): string =>
+  profile
+    |> ?.contact
+    |> ((c: { email: string } | null | undefined) => Option.fromNullable(c))
+    |> Option.mapP((c: { email: string }) => c.email)
+    |> Option.unwrapOrP("미등록");
+
+export val const gradeOf = flow
+  |> ((score: number) => Math.max(0, Math.min(100, score)))
+  |> ((clamped: number) => (clamped >= 90 ? "A" : clamped >= 70 ? "B" : "C"));
+
+/* 4. result 블록의 특수 위치: 템플릿 리터럴 보간, 파이프라인 헤드 */
+
+const price = (sku: string): TResult<number, string> =>
+  sku === "A1" ? Result.Ok(1200) : Result.Err(`무명 SKU ${sku}`);
+
+// result 블록을 `|>` 파이프라인 헤드로 쓰면 성공 return이 함수의 실제
+// return으로 새는 오컴파일(이슈 #7)이 있다. 함수 인자·템플릿 보간 위치는
+// 정상이므로 unwrapOr의 인자로 넘긴다.
+export const receiptLine = (sku: string, qty: number): string =>
+  `${sku} × ${qty} = ${Result.unwrapOr(
+    result {
+      const unit = try price(sku);
+      return unit * qty;
+    },
+    0,
+  )}원`;
+
+/* 5. match arm 블록 안의 result 블록 (이슈 #4의 역방향 합성) */
+
+export const settle = (order: TOption<string>): number =>
+  match (order) {
+    Some(value: sku) => {
+      const settled = result {
+        const unit = try price(sku);
+        return unit + 100;
+      };
+      return Result.unwrapOr(settled, -1);
+    },
+    None => 0,
+  };
+
+/* 6. 튜플 match + 가드 + 곱 완전성 */
+
+export const mergeQuota = (
+  mine: TOption<number>,
+  team: TOption<number>,
+): number =>
+  match (mine, team) {
+    (Some(value: m), Some(value: t)) if m > t => m,
+    (Some, Some(value: t)) => t,
+    (Some(value: m), None) => m,
+    (None, Some(value: t)) => t,
+    (None, None) => 0,
+  };
+
+/* 7. 유한 리터럴 유니언의 `_` 없는 리터럴 match (--check-types 완전성 검사 대상) */
+
+export type Toggle = "on" | "off";
+
+export const flip = (t: Toggle): Toggle =>
+  match (t) {
+    // 로워링 슬롯이 무주석이라 리터럴 arm 값이 반환 문맥 타입을 못 받아
+    // string으로 widen된다(이슈 #8) — as const로 리터럴 타입을 지킨다.
+    "on" => "off" as const,
+    "off" => "on" as const,
+  };
+
+/* 8. val 바인딩을 같은 파일의 val 파라미터로 전달 */
+
+const sizeOf = (val items: readonly number[]): number => items.length;
+
+val const BASE_UNITS: readonly number[] = [1, 2, 3];
+
+export const baseSize = (): number => sizeOf(BASE_UNITS);
+
+/* 9. if let + 중첩 패턴, let-else + or-패턴 */
+
+export const firstOkValue = (
+  r: TResult<TOption<number>, string>,
+): number => {
+  if let Ok(value: Some(value: v)) = r {
+    return v;
+  }
+  return -1;
+};
+
+export variant Shape {
+  Circle(radius: number),
+  Square(radius: number),
+  Dot,
+}
+
+/** let-else + or-패턴 (같은 (필드,이름) 집합). */
+export const radiusOrZero = (shape: Shape): number => {
+  const Circle(radius) | Square(radius) = shape else {
+    return 0;
+  };
+  return radius;
+};
+
+/* 10. 리터럴 or-패턴 + 가드가 섞인 match */
+
+export const httpClass = (code: number, retried: boolean): string =>
+  match (code) {
+    200 | 201 | 204 => "성공",
+    429 if retried => "포기",
+    429 => "재시도",
+    404 => "없음",
+    _ => "그 외",
+  };
