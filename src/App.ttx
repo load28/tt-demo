@@ -11,6 +11,8 @@ import {
   cyclePriority,
   describeAction,
   describeError,
+  dueBadge,
+  dueStatusOf,
   emptyMessage,
   filterLabel,
   parseTodo,
@@ -22,7 +24,11 @@ import {
   visibleTodos,
 } from "./todo.tt";
 import {
-  describeStorageError,
+  LEGACY_KEY,
+  LoadError,
+  STORAGE_KEY,
+  describeLoadError,
+  describeSaveError,
   loadTodos,
   saveTodos,
 } from "./storage.tt";
@@ -33,35 +39,78 @@ val const FILTERS: readonly Filter[] = [
   Filter.Completed,
 ];
 
-/** 모듈 로드 시 한 번만 읽고, 목록과 안내 배너가 같은 결과를 나눠 씁니다. */
+/** 로컬 달력 기준 오늘 ("YYYY-MM-DD") — UTC(toISOString) 사용 시 자정 부근 오차. */
+const todayLocal = (): string => {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${now.getFullYear()}-${month}-${day}`;
+};
+
+/** 모듈 로드 시 한 번만 읽고, 아래 초기값들이 같은 결과를 나눠 씁니다. */
 const initialLoad = loadTodos();
+
+const initialTodos: readonly Todo[] = match (initialLoad) {
+  Ok(value: outcome) => outcome.todos,
+  Err => [],
+};
+
+/** 로드 결과에서 사용자에게 알릴 것들 (마이그레이션·부분 복구·실패). */
+const initialNotices: readonly string[] = match (initialLoad) {
+  Ok(value: outcome) => {
+    const notes: string[] = [];
+    if let Some(value: from) = outcome.migratedFrom {
+      notes.push(`이전 형식(v${from})의 목록을 자동으로 옮겨왔어요.`);
+    }
+    if (outcome.skipped > 0) {
+      notes.push(`손상된 항목 ${outcome.skipped}개를 제외하고 불러왔어요.`);
+    }
+    return notes;
+  },
+  Err(error: e) => [describeLoadError(e)],
+};
+
+/**
+ * 더 새로운 형식(FutureVersion)의 데이터가 있으면 이 화면의 저장을 전부 막아
+ * 최신 데이터를 덮어쓰지 않습니다 — 중첩 패턴으로 판정.
+ */
+const saveBlocked: boolean = match (initialLoad) {
+  Err(error: FutureVersion) => true,
+  _ => false,
+};
 
 const nextIdOf = (todos: readonly Todo[]): number =>
   todos.reduce((max, todo) => Math.max(max, todo.id), 0) + 1;
 
 export default function App() {
-  const [todos, setTodos] = useState<readonly Todo[]>(() =>
-    match (initialLoad) {
-      Ok(value) => value,
-      Err => [],
-    },
-  );
+  const [todos, setTodos] = useState<readonly Todo[]>(initialTodos);
   const [history, setHistory] = useState<readonly Action[]>([]);
   const [draft, setDraft] = useState("");
+  const [draftDue, setDraftDue] = useState("");
   const [filter, setFilter] = useState<Filter>(Filter.All);
   const [error, setError] = useState<TOption<TodoError>>(Option.None);
-  const [notice, setNotice] = useState<TOption<string>>(() =>
-    match (initialLoad) {
-      Ok => Option.None,
-      Err(error: e) => Option.Some(describeStorageError(e)),
-    },
-  );
+  const [saveNotice, setSaveNotice] = useState<TOption<string>>(Option.None);
+  const [externalChange, setExternalChange] = useState(false);
 
   useEffect(() => {
+    if (saveBlocked) { return; }
     if let Err(error: e) = saveTodos(todos) {
-      setNotice(Option.Some(describeStorageError(e)));
+      setSaveNotice(Option.Some(describeSaveError(e)));
+    } else {
+      setSaveNotice(Option.None);
     }
   }, [todos]);
+
+  /** 다른 탭이 같은 목록을 저장하면 알리고 새로고침을 권합니다. */
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === STORAGE_KEY || event.key === LEGACY_KEY) {
+        setExternalChange(true);
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
 
   const commit = (next: readonly Todo[], action: Action) => {
     setTodos(next);
@@ -70,15 +119,19 @@ export default function App() {
 
   const addTodo = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    // ttc 현재 버전은 문(statement) 위치의 단독 match에서 ICE가 나므로 return으로 감쌉니다.
+    // ttc 현재 버전은 문(statement) 위치의 단독 match에서 ICE가 나므로(이슈 #1)
+    // return으로 감쌉니다.
     return match (parseTodo(draft, todos)) {
       Ok(value: text) => {
         const id = nextIdOf(todos);
+        const due: TOption<string> =
+          draftDue === "" ? Option.None : Option.Some(draftDue);
         commit(
-          [...todos, { id, text, done: false, priority: Priority.Medium }],
+          [...todos, { id, text, done: false, priority: Priority.Medium, due }],
           Action.Added(id),
         );
         setDraft("");
+        setDraftDue("");
         setError(Option.None);
       },
       Err(error: e) => {
@@ -124,7 +177,7 @@ export default function App() {
 
   const clearDone = () => {
     const removed = todos.filter((todo) => todo.done);
-    if (removed.length === 0) return;
+    if (removed.length === 0) { return; }
     commit(
       todos.filter((todo) => !todo.done),
       Action.ClearedDone(removed),
@@ -141,7 +194,8 @@ export default function App() {
     setHistory(history.slice(0, -1));
   };
 
-  const shown = sortTodos(visibleTodos(todos, filter));
+  const today = todayLocal();
+  const shown = sortTodos(visibleTodos(todos, filter), today);
   const progress = progressOf(todos);
   const remaining = todos.filter((todo) => !todo.done).length;
   const doneCount = todos.length - remaining;
@@ -152,8 +206,8 @@ export default function App() {
     Some(value: e) => <p className="error">{describeError(e)}</p>,
     None => null,
   };
-  const noticeView = match (notice) {
-    Some(value: message) => <p className="notice">{message}</p>,
+  const saveNoticeView = match (saveNotice) {
+    Some(value: message) => <p className="notice warn">{message}</p>,
     None => null,
   };
   const emptyView = match (emptyMessage(filter, progress)) {
@@ -166,6 +220,48 @@ export default function App() {
     Some(value: last) => describeAction(last),
     None => "되돌릴 변경이 없어요",
   };
+
+  const rows = shown.map((todo) => {
+    const badge = match (dueBadge(dueStatusOf(todo, today))) {
+      Some(value: text) => (
+        <span className={`due ${dueStatusOf(todo, today).kind.toLowerCase()}`}>
+          {text}
+        </span>
+      ),
+      None => null,
+    };
+    return (
+      <li key={todo.id} className={todo.done ? "done" : ""}>
+        <label>
+          <input
+            type="checkbox"
+            checked={todo.done}
+            onChange={() => toggleTodo(todo.id)}
+          />
+          <span>{todo.text}</span>
+        </label>
+        <span className="actions">
+          {badge}
+          <button
+            type="button"
+            className={`priority ${todo.priority.kind.toLowerCase()}`}
+            onClick={() => reprioritize(todo.id)}
+            title="우선순위 바꾸기"
+          >
+            {priorityLabel(todo.priority)}
+          </button>
+          <button
+            type="button"
+            className="remove"
+            onClick={() => removeTodo(todo.id)}
+            aria-label={`"${todo.text}" 삭제`}
+          >
+            ×
+          </button>
+        </span>
+      </li>
+    );
+  });
 
   return (
     <main className="app">
@@ -186,7 +282,24 @@ export default function App() {
         <code>result</code> · <code>|&gt;</code> · <code>flow</code>로 만든 투두 앱
       </p>
 
-      {noticeView}
+      {initialNotices.map((note) => (
+        <p key={note} className={saveBlocked ? "notice warn" : "notice"}>
+          {note}
+        </p>
+      ))}
+      {saveNoticeView}
+      {externalChange && (
+        <p className="notice warn">
+          다른 탭에서 목록이 바뀌었어요.{" "}
+          <button
+            type="button"
+            className="reload"
+            onClick={() => location.reload()}
+          >
+            새로고침
+          </button>
+        </p>
+      )}
 
       <form className="add" onSubmit={addTodo}>
         <input
@@ -197,6 +310,12 @@ export default function App() {
           }}
           placeholder="무엇을 해야 하나요?"
           aria-label="새 할 일"
+        />
+        <input
+          type="date"
+          value={draftDue}
+          onChange={(event) => setDraftDue(event.target.value)}
+          aria-label="마감일"
         />
         <button type="submit">추가</button>
       </form>
@@ -223,38 +342,7 @@ export default function App() {
         )}
       </div>
 
-      <ul className="todos">
-        {shown.map((todo) => (
-          <li key={todo.id} className={todo.done ? "done" : ""}>
-            <label>
-              <input
-                type="checkbox"
-                checked={todo.done}
-                onChange={() => toggleTodo(todo.id)}
-              />
-              <span>{todo.text}</span>
-            </label>
-            <span className="actions">
-              <button
-                type="button"
-                className={`priority ${todo.priority.kind.toLowerCase()}`}
-                onClick={() => reprioritize(todo.id)}
-                title="우선순위 바꾸기"
-              >
-                {priorityLabel(todo.priority)}
-              </button>
-              <button
-                type="button"
-                className="remove"
-                onClick={() => removeTodo(todo.id)}
-                aria-label={`"${todo.text}" 삭제`}
-              >
-                ×
-              </button>
-            </span>
-          </li>
-        ))}
-      </ul>
+      <ul className="todos">{rows}</ul>
 
       {shown.length === 0 ? (
         emptyView

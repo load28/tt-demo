@@ -13,7 +13,72 @@ export type Todo = {
   text: string;
   done: boolean;
   priority: Priority;
+  /** "YYYY-MM-DD" (로컬 달력 기준). 저장값이 손상됐으면 로드 시 None으로 강등. */
+  due: TOption<string>;
 };
+
+/**
+ * 마감 상태 머신. 케이스 매트릭스:
+ * - 마감일 없음                     → NoDue
+ * - 날짜 문자열이 파싱 불가(손상)    → NoDue (조용히 강등, 저장은 건드리지 않음)
+ * - 오늘과 같은 달력 날짜            → DueToday (자정 경계는 로컬 달력 일수 차이로 판정)
+ * - 미래                            → Upcoming(daysLeft)
+ * - 과거                            → Overdue(daysLate)
+ */
+export variant DueStatus {
+  NoDue,
+  Upcoming(daysLeft: number),
+  DueToday,
+  Overdue(daysLate: number),
+}
+
+/** "YYYY-MM-DD" 두 개의 달력 일수 차이. 파싱 불가면 NaN. */
+const diffDays = (due: string, today: string): number => {
+  const parse = (value: string): number => {
+    const matched = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+    if (matched === null) return Number.NaN;
+    const time = Date.UTC(
+      Number(matched[1]),
+      Number(matched[2]) - 1,
+      Number(matched[3]),
+    );
+    return Number.isFinite(time) ? time : Number.NaN;
+  };
+  return (parse(due) - parse(today)) / 86_400_000;
+};
+
+export const dueStatusOf = (todo: Todo, today: string): DueStatus =>
+  match (todo.due) {
+    None => DueStatus.NoDue,
+    Some(value: due) => {
+      const days = diffDays(due, today);
+      // 블록 arm에서 중괄호 없는 `if (c) return v;`는 break가 if 밖으로 새는
+      // 오컴파일이 있으므로(이슈 #5) 반드시 중괄호를 붙입니다.
+      if (!Number.isFinite(days)) { return DueStatus.NoDue; }
+      if (days === 0) { return DueStatus.DueToday; }
+      return days > 0
+        ? DueStatus.Upcoming(days)
+        : DueStatus.Overdue(-days);
+    },
+  };
+
+/** 배지 문구 — 임박(3일 이내)만 강조하고 먼 미래는 조용히 둡니다. */
+export const dueBadge = (status: DueStatus): TOption<string> =>
+  match (status) {
+    NoDue => Option.None,
+    DueToday => Option.Some("오늘까지"),
+    Upcoming(daysLeft) if daysLeft <= 3 => Option.Some(`${daysLeft}일 남음`),
+    Upcoming => Option.None,
+    Overdue(daysLate) => Option.Some(`${daysLate}일 지남`),
+  };
+
+const dueRank = (status: DueStatus): number =>
+  match (status) {
+    Overdue => 0,
+    DueToday => 1,
+    Upcoming => 2,
+    NoDue => 3,
+  };
 
 export variant Filter {
   All,
@@ -108,10 +173,16 @@ const priorityRank = (priority: Priority): number =>
     Low => 2,
   };
 
-/** 긴급한 것 먼저, 같은 우선순위는 추가 순서 유지. */
-export const sortTodos = (todos: readonly Todo[]): readonly Todo[] =>
+/** 지난 것 → 오늘 → 임박 → 마감 없음, 그 안에서 긴급 먼저, 같으면 추가 순. */
+export const sortTodos = (
+  todos: readonly Todo[],
+  today: string,
+): readonly Todo[] =>
   [...todos].sort(
-    (a, b) => priorityRank(a.priority) - priorityRank(b.priority) || a.id - b.id,
+    (a, b) =>
+      dueRank(dueStatusOf(a, today)) - dueRank(dueStatusOf(b, today)) ||
+      priorityRank(a.priority) - priorityRank(b.priority) ||
+      a.id - b.id,
   );
 
 export const progressOf = (todos: readonly Todo[]): Progress => {

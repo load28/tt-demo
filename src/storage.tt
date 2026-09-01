@@ -1,76 +1,183 @@
-import type { TResult } from "@tt/std";
+import type { TOption, TResult } from "@tt/std";
+import * as Option from "@tt/std/option";
 import * as Result from "@tt/std/result";
 
 import { Priority, type Todo } from "./todo.tt";
 
-export variant StorageError {
+/**
+ * 저장 스키마와 로드 정책. 케이스 매트릭스:
+ *
+ * | 저장 상태                        | 결과                                        |
+ * |----------------------------------|---------------------------------------------|
+ * | 키 없음(null)                    | 빈 목록, 알림 없음                          |
+ * | v1: 최상위가 배열 (구버전)        | 항목별 복구 후 migratedFrom=Some(1)         |
+ * | v2: {version:2, todos:[...]}     | 항목별 복구 후 정상 로드                    |
+ * | version > 2 (미래 버전)          | Err(FutureVersion) — 데이터 보존을 위해     |
+ * |                                  | 이후 저장도 차단 (덮어쓰기 금지 정책)        |
+ * | 그 밖의 형태/버전                 | Err(Malformed)                              |
+ * | JSON 파싱 불가                    | Err(Malformed(SyntaxError 메시지))          |
+ * | 배열 안 일부 항목만 손상           | 손상 항목만 제외(skipped), 나머지는 로드     |
+ * | localStorage 접근 자체가 예외      | Err(Unavailable)                            |
+ *
+ * 저장 실패는 별도 축: 용량 초과(QuotaExceeded)와 그 외(Unavailable).
+ */
+export const SCHEMA_VERSION = 2;
+export const STORAGE_KEY = "tt-demo.todos.v2";
+/** v1이 쓰던 키 — 마이그레이션 후에도 지우지 않습니다(롤백 여지). */
+export const LEGACY_KEY = "tt-demo.todos.v1";
+
+export variant LoadError {
   Unavailable,
   Malformed(detail: string),
-  BadShape(index: number),
+  FutureVersion(found: number),
 }
 
-export const describeStorageError = (error: StorageError): string =>
-  match (error) {
-    Unavailable => "브라우저 저장소를 사용할 수 없어 목록이 저장되지 않아요.",
-    Malformed(detail) => `저장된 목록을 읽지 못했어요: ${detail}`,
-    BadShape(index) => `저장된 ${index + 1}번째 항목이 손상되어 무시했어요.`,
-  };
+export variant SaveError {
+  Unavailable,
+  QuotaExceeded,
+}
 
-const KEY = "tt-demo.todos.v1";
-
-/** result 블록 — 각 단계의 Err가 그대로 블록의 Err가 됩니다. */
-export const loadTodos = (): TResult<readonly Todo[], StorageError> => result {
-  const raw = try readRaw();
-  // 로워링이 return 값을 무주석 중간 상수로 옮기며 빈 배열이 문맥 타입을 잃고
-  // any[]가 되므로(strict에서 ts7005) 명시적 단언으로 우회합니다.
-  if (raw === null) return [] as readonly Todo[];
-  const parsed = try parseJson(raw);
-  const todos = try decodeTodos(parsed);
-  return todos;
+export type LoadOutcome = {
+  todos: readonly Todo[];
+  /** 손상되어 제외한 항목 수 (부분 복구 정책). */
+  skipped: number;
+  /** 구버전에서 자동 이전됐으면 그 버전. */
+  migratedFrom: TOption<number>;
 };
 
-export const saveTodos = (
-  todos: readonly Todo[],
-): TResult<undefined, StorageError> =>
-  Result.fromThrowable(() => {
-    localStorage.setItem(KEY, JSON.stringify(todos.map(encodeTodo)));
-  })
-    |> Result.mapErrP(() => StorageError.Unavailable)
-    |> Result.mapP(() => undefined);
+export const describeLoadError = (error: LoadError): string =>
+  match (error) {
+    Unavailable => "브라우저 저장소를 사용할 수 없어 목록을 불러오지 못했어요.",
+    Malformed(detail) => `저장된 목록을 읽지 못했어요: ${detail}`,
+    FutureVersion(found) =>
+      `저장된 목록이 더 새로운 형식(v${found})이에요. 데이터 보호를 위해 이 화면의 변경은 저장되지 않아요.`,
+  };
 
-const readRaw = (): TResult<string | null, StorageError> =>
-  Result.fromThrowable(() => localStorage.getItem(KEY))
-    |> Result.mapErrP(() => StorageError.Unavailable);
+export const describeSaveError = (error: SaveError): string =>
+  match (error) {
+    Unavailable => "저장소에 접근할 수 없어 변경이 저장되지 않았어요.",
+    QuotaExceeded => "저장 공간이 가득 차서 변경이 저장되지 않았어요.",
+  };
 
-/** is 패턴 — JSON 파싱 실패를 예외 클래스로 구분합니다. */
-const parseJson = (raw: string): TResult<unknown, StorageError> =>
-  match (Result.fromThrowable(() => JSON.parse(raw) as unknown)) {
-    Ok(value) => Result.Ok(value),
-    Err(error) => match (error) {
-      is SyntaxError { message } => Result.Err(StorageError.Malformed(message)),
-      _ => Result.Err(StorageError.Malformed(String(error))),
+export const loadTodos = (): TResult<LoadOutcome, LoadError> => result {
+  const raw = try readRaw();
+  if (raw === null)
+    return {
+      todos: [] as readonly Todo[],
+      skipped: 0,
+      migratedFrom: Option.None,
+    };
+  const parsed = try parseJson(raw);
+  const envelope = try detectEnvelope(parsed);
+  // result 블록 안의 match 표현식은 로워링이 이중 방출되며 invalid TS가 되므로
+  // (이슈 #4) match를 블록 밖 헬퍼로 추출합니다.
+  return outcomeOf(envelope);
+};
+
+const outcomeOf = (envelope: Envelope): LoadOutcome =>
+  match (envelope) {
+    V1(items) => {
+      const { todos, skipped } = salvage(items, decodeV1Item);
+      return { todos, skipped, migratedFrom: Option.Some(1) };
+    },
+    V2(items) => {
+      const { todos, skipped } = salvage(items, decodeV2Item);
+      return { todos, skipped, migratedFrom: Option.None };
     },
   };
 
-const decodeTodos = (
-  value: unknown,
-): TResult<readonly Todo[], StorageError> => {
-  if (!Array.isArray(value)) return Result.Err(StorageError.Malformed("배열이 아님"));
-  return Result.collect(value.map((item, index) => decodeTodo(item, index)));
+export const saveTodos = (
+  todos: readonly Todo[],
+): TResult<undefined, SaveError> =>
+  Result.fromThrowable(() => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: SCHEMA_VERSION,
+        todos: todos.map(encodeTodo),
+      }),
+    );
+  })
+    |> Result.mapErrP(classifySaveError)
+    |> Result.mapP(() => undefined);
+
+/** is 패턴으로 예외 클래스를 구분 — 용량 초과는 별도 케이스. */
+const classifySaveError = (error: unknown): SaveError =>
+  match (error) {
+    is DOMException { name } =>
+      name === "QuotaExceededError"
+        ? SaveError.QuotaExceeded
+        : SaveError.Unavailable,
+    _ => SaveError.Unavailable,
+  };
+
+/** v2 키 우선, 없으면 v1 키(구버전 설치)로 폴백. */
+const readRaw = (): TResult<string | null, LoadError> =>
+  Result.fromThrowable(
+    () => localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem(LEGACY_KEY),
+  ) |> Result.mapErrP(() => LoadError.Unavailable);
+
+const parseJson = (raw: string): TResult<unknown, LoadError> =>
+  match (Result.fromThrowable(() => JSON.parse(raw) as unknown)) {
+    Ok(value) => Result.Ok(value),
+    Err(error) => match (error) {
+      is SyntaxError { message } => Result.Err(LoadError.Malformed(message)),
+      _ => Result.Err(LoadError.Malformed(String(error))),
+    },
+  };
+
+variant Envelope {
+  V1(items: readonly unknown[]),
+  V2(items: readonly unknown[]),
+}
+
+const detectEnvelope = (parsed: unknown): TResult<Envelope, LoadError> => {
+  if (Array.isArray(parsed)) return Result.Ok(Envelope.V1(parsed));
+  if (!isRecord(parsed))
+    return Result.Err(LoadError.Malformed("객체도 배열도 아님"));
+  const { version, todos } = parsed;
+  if (typeof version !== "number")
+    return Result.Err(LoadError.Malformed("version 필드가 없음"));
+  if (version > SCHEMA_VERSION)
+    return Result.Err(LoadError.FutureVersion(version));
+  if (version !== SCHEMA_VERSION)
+    return Result.Err(LoadError.Malformed(`알 수 없는 버전 v${version}`));
+  if (!Array.isArray(todos))
+    return Result.Err(LoadError.Malformed("todos가 배열이 아님"));
+  return Result.Ok(Envelope.V2(todos));
 };
 
-type Stored = {
+/** 부분 복구 — 손상 항목은 제외하고 개수만 셉니다. */
+const salvage = (
+  items: readonly unknown[],
+  decode: (item: unknown) => TOption<Todo>,
+): { todos: readonly Todo[]; skipped: number } => {
+  const todos: Todo[] = [];
+  let skipped = 0;
+  for (const item of items) {
+    if let Some(value: todo) = decode(item) {
+      todos.push(todo);
+    } else {
+      skipped += 1;
+    }
+  }
+  return { todos, skipped };
+};
+
+type StoredV2 = {
   id: number;
   text: string;
   done: boolean;
   priority: string;
+  due: string | null;
 };
 
-const encodeTodo = (todo: Todo): Stored => ({
+const encodeTodo = (todo: Todo): StoredV2 => ({
   id: todo.id,
   text: todo.text,
   done: todo.done,
   priority: priorityKey(todo.priority),
+  due: Option.toNullable(todo.due),
 });
 
 const priorityKey = (priority: Priority): string =>
@@ -83,31 +190,40 @@ const priorityKey = (priority: Priority): string =>
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
-/** 함수 단위 try — Err는 이 함수의 반환값으로 즉시 전파됩니다. */
-const decodeTodo = (
+const decodePriority = (value: unknown): TOption<Priority> =>
+  match (value) {
+    "low" => Option.Some(Priority.Low),
+    "medium" => Option.Some(Priority.Medium),
+    "high" => Option.Some(Priority.High),
+    _ => Option.None,
+  };
+
+const decodeCore = (
   item: unknown,
-  index: number,
-): TResult<Todo, StorageError> => {
-  if (!isRecord(item)) return Result.Err(StorageError.BadShape(index));
-  const { id, text, done, priority } = item;
+): TOption<{ id: number; text: string; done: boolean; priority: Priority }> => {
+  if (!isRecord(item)) return Option.None;
+  const { id, text, done } = item;
   if (
     typeof id !== "number" ||
     typeof text !== "string" ||
     typeof done !== "boolean"
   )
-    return Result.Err(StorageError.BadShape(index));
-  const decoded = try decodePriority(priority, index);
-  return Result.Ok({ id, text, done, priority: decoded });
+    return Option.None;
+  const Some(value: priority) = decodePriority(item.priority) else {
+    return Option.None;
+  };
+  return Option.Some({ id, text, done, priority });
 };
 
-/** unknown 값에 대한 리터럴 match — 런타임 === 비교로 동작합니다. */
-const decodePriority = (
-  value: unknown,
-  index: number,
-): TResult<Priority, StorageError> =>
-  match (value) {
-    "low" => Result.Ok(Priority.Low),
-    "medium" => Result.Ok(Priority.Medium),
-    "high" => Result.Ok(Priority.High),
-    _ => Result.Err(StorageError.BadShape(index)),
-  };
+/** v1 항목: due 필드가 없던 시절 — None으로 채워 이전. */
+const decodeV1Item = (item: unknown): TOption<Todo> =>
+  Option.map(decodeCore(item), (core) => ({ ...core, due: Option.None }));
+
+/** v2 항목: due는 문자열 또는 null. 그 외 타입이면 항목 전체를 손상으로 봅니다. */
+const decodeV2Item = (item: unknown): TOption<Todo> => {
+  const Some(value: core) = decodeCore(item) else { return Option.None; };
+  if (!isRecord(item)) return Option.None;
+  const due = item.due;
+  if (due !== null && typeof due !== "string") return Option.None;
+  return Option.Some({ ...core, due: Option.fromNullable(due) });
+};

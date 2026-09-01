@@ -83,11 +83,56 @@ h1 {
 }
 
 .notice {
-  margin: 0 0 1rem;
+  margin: 0 0 0.5rem;
   padding: 0.5rem 0.75rem;
   border-radius: 0.6rem;
   background: var(--accent-soft);
   color: var(--accent);
+  font-size: 0.85rem;
+}
+
+.notice.warn {
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+}
+
+.reload {
+  border: 1px solid currentcolor;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: inherit;
+  font-size: 0.8rem;
+  padding: 0.1rem 0.5rem;
+  cursor: pointer;
+  margin-left: 0.25rem;
+}
+
+.due {
+  border-radius: 999px;
+  font-size: 0.72rem;
+  padding: 0.15rem 0.55rem;
+  background: var(--accent-soft);
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.due.overdue {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}
+
+.due.duetoday {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}
+
+.add input[type="date"] {
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  background: transparent;
+  color: var(--muted);
+  padding: 0.6rem 0.5rem;
   font-size: 0.85rem;
 }
 
@@ -175,6 +220,7 @@ h1 {
 }
 
 .add button {
+  white-space: nowrap;
   border: none;
   border-radius: 0.6rem;
   background: var(--accent);
