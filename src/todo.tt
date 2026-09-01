@@ -1,10 +1,18 @@
-import type { TResult } from "@tt/std";
+import type { TOption, TResult } from "@tt/std";
+import * as Option from "@tt/std/option";
 import * as Result from "@tt/std/result";
+
+export variant Priority {
+  Low,
+  Medium,
+  High,
+}
 
 export type Todo = {
   id: number;
   text: string;
   done: boolean;
+  priority: Priority;
 };
 
 export variant Filter {
@@ -19,13 +27,35 @@ export variant TodoError {
   Duplicate(text: string),
 }
 
+/** 전체 목록의 진행 상태 — 튜플 match의 두 번째 축으로 쓰입니다. */
+export variant Progress {
+  Empty,
+  NoneDone,
+  SomeDone,
+  AllDone,
+}
+
+/** 되돌리기(undo)를 위한 변경 기록. */
+export variant Action {
+  Added(id: number),
+  Removed(todo: Todo, index: number),
+  Toggled(id: number),
+  Reprioritized(id: number, previous: Priority),
+  ClearedDone(removed: readonly Todo[]),
+}
+
 const MAX_LENGTH = 80;
+
+/** flow로 합성한 입력 정규화 — trim 후 연속 공백을 하나로 접습니다. */
+val const normalize = flow
+  |> ((raw: string) => raw.trim())
+  |> ((raw: string) => raw.replace(/\s+/g, " "));
 
 export const parseTodo = (
   raw: string,
   todos: readonly Todo[],
 ): TResult<string, TodoError> => {
-  const text = raw |> .trim();
+  const text = raw |> normalize;
   if (text.length === 0) return Result.Err(TodoError.Empty);
   if (text.length > MAX_LENGTH) return Result.Err(TodoError.TooLong(MAX_LENGTH));
   if (todos.some((todo) => todo.text === text))
@@ -57,10 +87,92 @@ export const filterLabel = (filter: Filter): string =>
     Completed => "완료",
   };
 
-export const summary = (todos: readonly Todo[]): string => {
-  const remaining = todos.filter((todo) => !todo.done).length;
-  return match (remaining) {
-    0 => "모두 완료! 🎉",
-    _ => `${remaining}개 남음`,
+export const cyclePriority = (priority: Priority): Priority =>
+  match (priority) {
+    Low => Priority.Medium,
+    Medium => Priority.High,
+    High => Priority.Low,
   };
+
+export const priorityLabel = (priority: Priority): string =>
+  match (priority) {
+    Low => "여유",
+    Medium => "보통",
+    High => "긴급",
+  };
+
+const priorityRank = (priority: Priority): number =>
+  match (priority) {
+    High => 0,
+    Medium => 1,
+    Low => 2,
+  };
+
+/** 긴급한 것 먼저, 같은 우선순위는 추가 순서 유지. */
+export const sortTodos = (todos: readonly Todo[]): readonly Todo[] =>
+  [...todos].sort(
+    (a, b) => priorityRank(a.priority) - priorityRank(b.priority) || a.id - b.id,
+  );
+
+export const progressOf = (todos: readonly Todo[]): Progress => {
+  const done = todos.filter((todo) => todo.done).length;
+  if (todos.length === 0) return Progress.Empty;
+  if (done === 0) return Progress.NoneDone;
+  return done === todos.length ? Progress.AllDone : Progress.SomeDone;
 };
+
+/** 가드 있는 match — 같은 태그를 가드 arm이 먼저 가로챌 수 있습니다. */
+export const progressLabel = (progress: Progress, remaining: number): string =>
+  match (progress) {
+    Empty => "",
+    AllDone if remaining === 0 => "모두 완료! 🎉",
+    AllDone => "모두 완료",
+    NoneDone | SomeDone => `${remaining}개 남음`,
+  };
+
+/** (필터 × 진행 상태) 튜플 match로 빈 목록 안내 문구를 고릅니다. */
+export const emptyMessage = (
+  filter: Filter,
+  progress: Progress,
+): TOption<string> =>
+  match (filter, progress) {
+    (_, Empty) => Option.Some("아직 할 일이 없어요."),
+    (Active, AllDone) => Option.Some("진행 중인 일이 없어요. 전부 끝!"),
+    (Completed, NoneDone) => Option.Some("아직 완료한 일이 없어요."),
+    _ => Option.None,
+  };
+
+/** action을 거꾸로 적용해 이전 목록을 복원합니다. */
+export const undoAction = (
+  todos: readonly Todo[],
+  action: Action,
+): readonly Todo[] =>
+  match (action) {
+    Added(id) => todos.filter((todo) => todo.id !== id),
+    Removed(todo, index) => [
+      ...todos.slice(0, index),
+      todo,
+      ...todos.slice(index),
+    ],
+    Toggled(id) => todos.map((todo) =>
+      todo.id === id ? { ...todo, done: !todo.done } : todo,
+    ),
+    Reprioritized(id, previous) => todos.map((todo) =>
+      todo.id === id ? { ...todo, priority: previous } : todo,
+    ),
+    ClearedDone(removed) => sortById([...todos, ...removed]),
+  };
+
+const sortById = (todos: readonly Todo[]): readonly Todo[] =>
+  [...todos].sort((a, b) => a.id - b.id);
+
+/** undo 버튼 라벨 — 가드 arm이 같은 태그를 먼저 가로챌 수 있습니다. */
+export const describeAction = (action: Action): string =>
+  match (action) {
+    Added => "추가 취소",
+    Toggled => "체크 취소",
+    Removed => "삭제 취소",
+    Reprioritized => "우선순위 취소",
+    ClearedDone(removed) if removed.length > 1 => `완료 ${removed.length}개 복원`,
+    ClearedDone => "비우기 취소",
+  };

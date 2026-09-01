@@ -1,0 +1,113 @@
+import type { TResult } from "@tt/std";
+import * as Result from "@tt/std/result";
+
+import { Priority, type Todo } from "./todo.tt";
+
+export variant StorageError {
+  Unavailable,
+  Malformed(detail: string),
+  BadShape(index: number),
+}
+
+export const describeStorageError = (error: StorageError): string =>
+  match (error) {
+    Unavailable => "브라우저 저장소를 사용할 수 없어 목록이 저장되지 않아요.",
+    Malformed(detail) => `저장된 목록을 읽지 못했어요: ${detail}`,
+    BadShape(index) => `저장된 ${index + 1}번째 항목이 손상되어 무시했어요.`,
+  };
+
+const KEY = "tt-demo.todos.v1";
+
+/** result 블록 — 각 단계의 Err가 그대로 블록의 Err가 됩니다. */
+export const loadTodos = (): TResult<readonly Todo[], StorageError> => result {
+  const raw = try readRaw();
+  // 로워링이 return 값을 무주석 중간 상수로 옮기며 빈 배열이 문맥 타입을 잃고
+  // any[]가 되므로(strict에서 ts7005) 명시적 단언으로 우회합니다.
+  if (raw === null) return [] as readonly Todo[];
+  const parsed = try parseJson(raw);
+  const todos = try decodeTodos(parsed);
+  return todos;
+};
+
+export const saveTodos = (
+  todos: readonly Todo[],
+): TResult<undefined, StorageError> =>
+  Result.fromThrowable(() => {
+    localStorage.setItem(KEY, JSON.stringify(todos.map(encodeTodo)));
+  })
+    |> Result.mapErrP(() => StorageError.Unavailable)
+    |> Result.mapP(() => undefined);
+
+const readRaw = (): TResult<string | null, StorageError> =>
+  Result.fromThrowable(() => localStorage.getItem(KEY))
+    |> Result.mapErrP(() => StorageError.Unavailable);
+
+/** is 패턴 — JSON 파싱 실패를 예외 클래스로 구분합니다. */
+const parseJson = (raw: string): TResult<unknown, StorageError> =>
+  match (Result.fromThrowable(() => JSON.parse(raw) as unknown)) {
+    Ok(value) => Result.Ok(value),
+    Err(error) => match (error) {
+      is SyntaxError { message } => Result.Err(StorageError.Malformed(message)),
+      _ => Result.Err(StorageError.Malformed(String(error))),
+    },
+  };
+
+const decodeTodos = (
+  value: unknown,
+): TResult<readonly Todo[], StorageError> => {
+  if (!Array.isArray(value)) return Result.Err(StorageError.Malformed("배열이 아님"));
+  return Result.collect(value.map((item, index) => decodeTodo(item, index)));
+};
+
+type Stored = {
+  id: number;
+  text: string;
+  done: boolean;
+  priority: string;
+};
+
+const encodeTodo = (todo: Todo): Stored => ({
+  id: todo.id,
+  text: todo.text,
+  done: todo.done,
+  priority: priorityKey(todo.priority),
+});
+
+const priorityKey = (priority: Priority): string =>
+  match (priority) {
+    Low => "low",
+    Medium => "medium",
+    High => "high",
+  };
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
+
+/** 함수 단위 try — Err는 이 함수의 반환값으로 즉시 전파됩니다. */
+const decodeTodo = (
+  item: unknown,
+  index: number,
+): TResult<Todo, StorageError> => {
+  if (!isRecord(item)) return Result.Err(StorageError.BadShape(index));
+  const { id, text, done, priority } = item;
+  if (
+    typeof id !== "number" ||
+    typeof text !== "string" ||
+    typeof done !== "boolean"
+  )
+    return Result.Err(StorageError.BadShape(index));
+  const decoded = try decodePriority(priority, index);
+  return Result.Ok({ id, text, done, priority: decoded });
+};
+
+/** unknown 값에 대한 리터럴 match — 런타임 === 비교로 동작합니다. */
+const decodePriority = (
+  value: unknown,
+  index: number,
+): TResult<Priority, StorageError> =>
+  match (value) {
+    "low" => Result.Ok(Priority.Low),
+    "medium" => Result.Ok(Priority.Medium),
+    "high" => Result.Ok(Priority.High),
+    _ => Result.Err(StorageError.BadShape(index)),
+  };

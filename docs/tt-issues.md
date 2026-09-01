@@ -9,6 +9,7 @@
 |---|------|--------|------|
 | 1 | 문(statement) 위치의 단독 `match` → 컴파일러 패닉(ICE) | 빌드 실패 — 에러가 명확해서 발견은 쉬움 | `return match`로 감싸기 |
 | 2 | JSX 컨테이너 안 `match` → 앞 형제 요소가 텍스트로 렌더됨 | **조용한 오컴파일** — 에러 없이 잘못된 화면 | match를 JSX 밖으로 빼기 |
+| 3 | `result` 블록의 `return [];` → 빈 배열이 문맥 타입을 잃고 `any[]` (ts7005/7034) | strict에서 타입 검사 실패 — 오탐(코드는 건전함) | `[] as readonly T[]`로 단언 |
 
 ---
 
@@ -160,10 +161,88 @@ return (
 
 ---
 
+## 3. `result` 블록의 로워링이 빈 배열의 문맥 타입을 잃음
+
+`result` 블록 안 `return value;`는 `const $tt_result = value;`라는 **무주석 중간
+상수**를 거쳐 `Ok`로 감싸진다. 손으로 쓴 함수라면 `return [];`의 빈 배열이 반환
+타입으로 문맥 추론(contextual typing)되지만, 중간 상수에는 문맥이 없어서 빈 배열이
+`any[]`가 되고 strict(noImplicitAny)에서 ts7005/ts7034가 난다. 진단 스스로
+"(in code ttc generated for this construct)"라고 표시한다 — 사용자 코드는 건전한데
+로워링이 타입 투명(type-transparent)하지 않아 생기는 오탐이다.
+
+### 재현
+
+```tt
+import type { TResult } from "@tt/std";
+import * as Result from "@tt/std/result";
+
+const g = (): TResult<number, string> => Result.Ok(1);
+
+const f = (): TResult<readonly number[], string> => result {
+  const n = try g();
+  if (n === 0) return [];   // ← 여기
+  return [n];               // 원소가 있으면 number[]로 추론돼 문제 없음
+};
+```
+
+### 실제 출력
+
+```
+error[ts7005]: Variable '$tt_result' implicitly has an 'any[]' type. (in code ttc generated for this construct)
+error[ts7034]: Variable '$tt_result' implicitly has type 'any[]' in some locations where its type cannot be determined. (in code ttc generated for this construct)
+```
+
+로워링 결과(`ttc -p`):
+
+```ts
+const f = (): TResult<readonly number[], string> => {
+  let $tt_v0;
+  $tt_v0: {
+  const $tt_t0 = g(); if (!("value" in $tt_t0)) { $tt_v0 = $tt_t0; break $tt_v0; } const n = $tt_t0.value;
+  if (n === 0) { const $tt_result = []; $tt_v0 = { kind: "Ok" as const, value: $tt_result }; break $tt_v0; }
+  //                                ^^ 문맥 타입 없음 → any[]
+  { const $tt_result = [n]; $tt_v0 = { kind: "Ok" as const, value: $tt_result }; break $tt_v0; }
+}
+  return $tt_v0;
+};
+```
+
+### 기대 동작
+
+`return value;`의 value가 원래 자리에서 받았을 문맥 타입을 유지해야 한다
+(빈 배열·빈 객체·제네릭 함수 결과 등 문맥 의존 표현식 전반이 영향권).
+
+### 우회
+
+리터럴에 타입을 직접 준다.
+
+```tt
+if (raw === null) return [] as readonly Todo[];
+```
+
+적용 위치: `src/storage.tt`의 `loadTodos`.
+
+---
+
 ## 문제 없었던 것들
 
-같은 세션에서 아래는 전부 문서대로 동작했다: `variant` 선언/생성자,
-태그·리터럴 match와 완전성 검사, 필드 이름 바인딩·별칭(`Ok(value: text)`),
-`|>` 파이프라인(`raw |> .trim()`), `@tt/std`의 `TResult`/`TOption`,
-`val` 바인딩, `.tsx` → `.ttx` import, unplugin의 Vite 통합과
-`ttc --check-types`의 tt+TS 통합 검사.
+같은 세션에서 아래는 전부 문서대로 동작했다 (2차 확장에서 검증 범위를 크게 넓힘):
+
+- `variant` 선언/생성자, 태그·리터럴 match와 완전성 검사, 필드 이름 바인딩·별칭(`Ok(value: text)`), 서브셋 바인딩(`Err => ...`)
+- **튜플 match** — `match (filter, progress)`의 곱 완전성 + 최종 `_`
+- **가드** — 같은 태그를 가드 arm이 먼저 가로채는 패턴(`ClearedDone(removed) if removed.length > 1`), 외부 변수 참조 가드
+- **or-패턴** — `NoneDone | SomeDone => ...`
+- **`is` 패턴** — `is SyntaxError { message }`로 예외 클래스 구분 (최종 `_` 필수 규칙 포함)
+- **`try`** — 함수 단위 전파(`decodeTodo`)와 `result` 블록 내부 전파 모두
+- **`result` 블록** — concise arrow 본문(`=> result { ... }`)에서 단계별 Err 전파 (이슈 #3의 빈 배열 케이스만 제외)
+- **`let-else`** — 발산하는 else(`{ return; }`)와 `Option.fromNullable` 조합
+- **`if let`** — `useEffect` 콜백 안에서 `if let Err(error: e) = saveTodos(todos)`
+- **`|>` 파이프라인** — 값 파이프, 메서드 스텝, `Result.mapErrP`/`mapP` 커리 스텝 체인
+- **`flow`** — 화살표 스텝 합성(`normalize`), 파이프 헤드에서 사용
+- **`@tt/std`** — `TResult`/`TOption`, `Result.fromThrowable`, `Result.collect`, `Option.fromNullable`
+- **`val`** — 모듈 수준 `val const` 바인딩
+- unknown 스크루티니에 대한 리터럴 match(런타임 `===` 분기), 중첩 match(arm 본문 안 match)
+- `.tsx` → `.ttx`/`.tt` import, unplugin Vite 통합, `ttc --check-types` 통합 검사
+
+런타임도 브라우저 e2e로 확인: 우선순위 순환·정렬, 되돌리기(모든 Action 역적용),
+완료 비우기, localStorage 저장/복원, 손상된 JSON·잘못된 항목의 에러 배너.

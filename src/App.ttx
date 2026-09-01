@@ -1,17 +1,31 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import type { TOption } from "@tt/std";
 import * as Option from "@tt/std/option";
 
 import {
+  Action,
   Filter,
+  Priority,
   TodoError,
   type Todo,
+  cyclePriority,
+  describeAction,
   describeError,
+  emptyMessage,
   filterLabel,
   parseTodo,
-  summary,
+  priorityLabel,
+  progressLabel,
+  progressOf,
+  sortTodos,
+  undoAction,
   visibleTodos,
 } from "./todo.tt";
+import {
+  describeStorageError,
+  loadTodos,
+  saveTodos,
+} from "./storage.tt";
 
 val const FILTERS: readonly Filter[] = [
   Filter.All,
@@ -19,20 +33,51 @@ val const FILTERS: readonly Filter[] = [
   Filter.Completed,
 ];
 
-let nextId = 1;
+/** 모듈 로드 시 한 번만 읽고, 목록과 안내 배너가 같은 결과를 나눠 씁니다. */
+const initialLoad = loadTodos();
+
+const nextIdOf = (todos: readonly Todo[]): number =>
+  todos.reduce((max, todo) => Math.max(max, todo.id), 0) + 1;
 
 export default function App() {
-  const [todos, setTodos] = useState<readonly Todo[]>([]);
+  const [todos, setTodos] = useState<readonly Todo[]>(() =>
+    match (initialLoad) {
+      Ok(value) => value,
+      Err => [],
+    },
+  );
+  const [history, setHistory] = useState<readonly Action[]>([]);
   const [draft, setDraft] = useState("");
   const [filter, setFilter] = useState<Filter>(Filter.All);
   const [error, setError] = useState<TOption<TodoError>>(Option.None);
+  const [notice, setNotice] = useState<TOption<string>>(() =>
+    match (initialLoad) {
+      Ok => Option.None,
+      Err(error: e) => Option.Some(describeStorageError(e)),
+    },
+  );
+
+  useEffect(() => {
+    if let Err(error: e) = saveTodos(todos) {
+      setNotice(Option.Some(describeStorageError(e)));
+    }
+  }, [todos]);
+
+  const commit = (next: readonly Todo[], action: Action) => {
+    setTodos(next);
+    setHistory([...history, action]);
+  };
 
   const addTodo = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     // ttc 현재 버전은 문(statement) 위치의 단독 match에서 ICE가 나므로 return으로 감쌉니다.
     return match (parseTodo(draft, todos)) {
       Ok(value: text) => {
-        setTodos([...todos, { id: nextId++, text, done: false }]);
+        const id = nextIdOf(todos);
+        commit(
+          [...todos, { id, text, done: false, priority: Priority.Medium }],
+          Action.Added(id),
+        );
         setDraft("");
         setError(Option.None);
       },
@@ -43,31 +88,105 @@ export default function App() {
   };
 
   const toggleTodo = (id: number) =>
-    setTodos(
+    commit(
       todos.map((todo) =>
         todo.id === id ? { ...todo, done: !todo.done } : todo,
       ),
+      Action.Toggled(id),
     );
 
-  const removeTodo = (id: number) =>
-    setTodos(todos.filter((todo) => todo.id !== id));
+  const removeTodo = (id: number) => {
+    const index = todos.findIndex((todo) => todo.id === id);
+    const Some(value: removed) = Option.fromNullable(todos[index] ?? null) else {
+      return;
+    };
+    commit(
+      todos.filter((todo) => todo.id !== id),
+      Action.Removed(removed, index),
+    );
+  };
 
-  const shown = visibleTodos(todos, filter);
+  const reprioritize = (id: number) => {
+    const Some(value: target) = Option.fromNullable(
+      todos.find((todo) => todo.id === id) ?? null,
+    ) else {
+      return;
+    };
+    commit(
+      todos.map((todo) =>
+        todo.id === id
+          ? { ...todo, priority: cyclePriority(todo.priority) }
+          : todo,
+      ),
+      Action.Reprioritized(id, target.priority),
+    );
+  };
 
-  // JSX 컨테이너 안에서 match를 직접 쓰면 현재 ttc가 앞 형제 요소를 잘못
-  // 로워링하므로(슬롯이 JSX 텍스트로 방출됨) return 전에 값으로 계산합니다.
+  const clearDone = () => {
+    const removed = todos.filter((todo) => todo.done);
+    if (removed.length === 0) return;
+    commit(
+      todos.filter((todo) => !todo.done),
+      Action.ClearedDone(removed),
+    );
+  };
+
+  const undoLast = () => {
+    const Some(value: last) = Option.fromNullable(
+      history[history.length - 1] ?? null,
+    ) else {
+      return;
+    };
+    setTodos(undoAction(todos, last));
+    setHistory(history.slice(0, -1));
+  };
+
+  const shown = sortTodos(visibleTodos(todos, filter));
+  const progress = progressOf(todos);
+  const remaining = todos.filter((todo) => !todo.done).length;
+  const doneCount = todos.length - remaining;
+
+  // JSX 컨테이너 안 match는 앞 형제 요소를 잘못 로워링하므로(이슈 #2)
+  // 전부 return 전에 값으로 계산합니다.
   const errorView = match (error) {
     Some(value: e) => <p className="error">{describeError(e)}</p>,
     None => null,
   };
+  const noticeView = match (notice) {
+    Some(value: message) => <p className="notice">{message}</p>,
+    None => null,
+  };
+  const emptyView = match (emptyMessage(filter, progress)) {
+    Some(value: message) => <p className="empty">{message}</p>,
+    None => null,
+  };
+  const undoTitle = match (Option.fromNullable(
+    history[history.length - 1] ?? null,
+  )) {
+    Some(value: last) => describeAction(last),
+    None => "되돌릴 변경이 없어요",
+  };
 
   return (
     <main className="app">
-      <h1>tt todo</h1>
+      <header className="top">
+        <h1>tt todo</h1>
+        <button
+          type="button"
+          className="undo"
+          onClick={undoLast}
+          disabled={history.length === 0}
+          title={undoTitle}
+        >
+          ↩ {undoTitle}
+        </button>
+      </header>
       <p className="tagline">
-        <code>variant</code> · <code>match</code> · <code>|&gt;</code> ·{" "}
-        <code>TResult</code>로 만든 투두 앱
+        <code>variant</code> · <code>match</code> · <code>try</code> ·{" "}
+        <code>result</code> · <code>|&gt;</code> · <code>flow</code>로 만든 투두 앱
       </p>
+
+      {noticeView}
 
       <form className="add" onSubmit={addTodo}>
         <input
@@ -84,17 +203,24 @@ export default function App() {
 
       {errorView}
 
-      <div className="filters" role="group" aria-label="필터">
-        {FILTERS.map((option) => (
-          <button
-            key={option.kind}
-            type="button"
-            className={option.kind === filter.kind ? "active" : ""}
-            onClick={() => setFilter(option)}
-          >
-            {filterLabel(option)}
+      <div className="toolbar">
+        <div className="filters" role="group" aria-label="필터">
+          {FILTERS.map((option) => (
+            <button
+              key={option.kind}
+              type="button"
+              className={option.kind === filter.kind ? "active" : ""}
+              onClick={() => setFilter(option)}
+            >
+              {filterLabel(option)}
+            </button>
+          ))}
+        </div>
+        {doneCount > 0 && (
+          <button type="button" className="clear" onClick={clearDone}>
+            완료 {doneCount}개 비우기
           </button>
-        ))}
+        )}
       </div>
 
       <ul className="todos">
@@ -108,22 +234,32 @@ export default function App() {
               />
               <span>{todo.text}</span>
             </label>
-            <button
-              type="button"
-              className="remove"
-              onClick={() => removeTodo(todo.id)}
-              aria-label={`"${todo.text}" 삭제`}
-            >
-              ×
-            </button>
+            <span className="actions">
+              <button
+                type="button"
+                className={`priority ${todo.priority.kind.toLowerCase()}`}
+                onClick={() => reprioritize(todo.id)}
+                title="우선순위 바꾸기"
+              >
+                {priorityLabel(todo.priority)}
+              </button>
+              <button
+                type="button"
+                className="remove"
+                onClick={() => removeTodo(todo.id)}
+                aria-label={`"${todo.text}" 삭제`}
+              >
+                ×
+              </button>
+            </span>
           </li>
         ))}
       </ul>
 
-      {todos.length === 0 ? (
-        <p className="empty">아직 할 일이 없어요.</p>
+      {shown.length === 0 ? (
+        emptyView
       ) : (
-        <p className="summary">{summary(todos)}</p>
+        <p className="summary">{progressLabel(progress, remaining)}</p>
       )}
     </main>
   );
