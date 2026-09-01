@@ -312,6 +312,51 @@ export const orThrow = (o: TOption<number>): number => {
   return v;
 };
 
+/* 10-h. match 스크루티니 안의 match, 한 문장의 두 match */
+
+// match를 다른 match의 스크루티니에 직접 넣으면 로워링 슬롯 이름($tt_m)이
+// 충돌해 오컴파일된다(이슈 #14) — 내부 match를 먼저 바인딩한다.
+export const doubleFlip = (t: Toggle): Toggle => {
+  const flipped = match (t) { "on" => "off" as const, "off" => "on" as const };
+  return match (flipped) {
+    "on" => "off" as const,
+    "off" => "on" as const,
+  };
+};
+
+export const optSum = (a: TOption<number>, b: TOption<number>): number => {
+  const sum =
+    match (a) { Some(value: v) => v, None => 0 } +
+    match (b) { Some(value: v) => v, None => 0 };
+  return sum;
+};
+
+/* 10-i. 옵셔널 호출/인덱스 파이프 스텝 */
+
+export const callMaybe = (fn: ((n: number) => number) | undefined): number =>
+  (fn |> ?.(3)) ?? -1;
+
+export const lookup = (
+  table: Record<string, number> | undefined,
+  key: string,
+): number => (table |> ?.[key]) ?? -1;
+
+/* 10-j. 리터럴 패턴의 한글 문자열·숫자 구분자·bigint */
+
+export const wonOf = (label: string): number =>
+  match (label) {
+    "천원" => 1_000,
+    "만원" => 10_000,
+    _ => 0,
+  };
+
+export const bigLabel = (n: bigint): string =>
+  match (n) {
+    0n => "영",
+    1n => "일",
+    _ => "많음",
+  };
+
 /* 10. 리터럴 or-패턴 + 가드가 섞인 match */
 
 export const httpClass = (code: number, retried: boolean): string =>

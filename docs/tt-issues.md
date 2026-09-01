@@ -19,6 +19,10 @@
 | 10 | JSX 컨테이너(자식·속성) 안의 `\|>` 파이프라인 → JSX를 관통하는 파싱 불가 TS | 빌드 실패(verify-failed) | 파이프라인을 본문에서 계산 후 값만 보간 |
 | 11 | 제너레이터 본문에서는 문 위치의 `const x = match`조차 전부 `match-placement`로 거부 | 기능 공백 — match만 제너레이터에서 사용 불가 (if let·파이프라인·let-else는 허용) | match를 일반 함수로 추출 |
 | 12 | 식 전용 위치(클래스 필드·yield 피연산자)의 result 블록 → 말미 안전망 `return Ok(undefined)`이 반환 유니언 오염, ts2322 오탐 | strict에서 타입 검사 실패 — 오탐(코드는 건전함) | result 블록을 헬퍼 함수로 추출 |
+| 13 | match arm 블록의 `return try expr;` → ICE (`const x = try expr;`는 정상 진단) | 빌드 실패 (SourceOmitted ICE) | try를 const로 뽑아 진단을 받거나 구조 변경 |
+| 14 | match를 다른 match의 스크루티니에 직접 중첩 → 슬롯 이름(`$tt_m`) 충돌 | **조용한 오컴파일** — tt 검증 통과, `--check-types`는 ts2588, 런타임 TypeError | 내부 match를 const로 먼저 바인딩 |
+| 15 | 비교 연산식(`a < b`)이 튜플 match의 스크루티니 요소 → codegen ICE (괄호를 쳐도 동일) | 빌드 실패 ("switch variant alternative tests no constructor") | 비교식을 const로 뽑아 요소로 사용 |
+| 16 | 식 arm 안의 또 다른 tt 값 영역(템플릿 보간 안 match, 인자 위치 result 블록) → ICE | 빌드 실패 ("match reached expression emission without a host rewrite") | 블록 arm으로 바꾸고 내부 값을 호이스팅 |
 
 ---
 
@@ -638,6 +642,47 @@ readonly opening: TResult<number, string> = openingOf();
 
 ---
 
+## 13–16. 미세 조합 4건 (7~9차 라운드)
+
+**13. arm 블록의 `return try expr;` → ICE.** arm은 격리 값 영역이라 함수 타깃
+try가 금지인데, `const x = try g();` 형태는 정확한 `try-placement` 진단이
+나오는 반면 `return try g();` 형태는 진단 대신 SourceOmitted ICE가 난다.
+
+```tt
+match (b) {
+  true => { return try g(); },   // ICE
+  true => { const x = try g(); return x; },  // 정상 진단: try-placement
+}
+```
+
+**14. 중첩 스크루티니 match — 슬롯 충돌 오컴파일.** match를 다른 match의
+스크루티니에 직접 넣으면 외부의 결과 슬롯과 내부의 스크루티니 상수가 같은
+이름(`$tt_m`)으로 생성돼, 내부 arm의 대입이 자기 const를 가리킨다. 생성물이
+유효한 TS라 tt 자가 검증은 통과하고, `--check-types`에서 ts2588("Cannot
+assign to '$tt_m' because it is a constant"), 런타임에서 TypeError가 난다.
+
+```tt
+match (match (v) { A => V.B, B => V.A }) { A => 1, B => 2 }
+// 로워링: let $tt_m; { const $tt_m = v; ... $tt_m = V.B; ... }  ← 자기 자신에 대입
+```
+
+우회: 내부 match를 const로 먼저 바인딩. (`src/lab.tt`의 `doubleFlip`.)
+
+**15. 튜플 스크루티니 요소의 비교 연산식 → codegen ICE.** `match (a < b, v)`
+도, 문서가 안내하는 괄호 형태 `match ((a < b), v)`도 모두
+"switch variant alternative tests no constructor" ICE. boolean 변수·`x && y`
+논리식·단일 스크루티니 비교식은 정상 — 비교 연산자가 튜플 요소일 때만.
+우회: `const lt = a < b;` 후 요소로 사용.
+
+**16. 식 arm 안의 또 다른 tt 값 영역 → ICE.** 식 arm의 값 안에 다른 값
+영역이 직접 들어가면 "match reached expression emission without a host
+rewrite" ICE: 템플릿 보간 안의 match(`` A(n) => `${match (w) {...}}` ``),
+인자 위치의 result 블록(`A(n) => Result.unwrapOr(result {...}, -1)`).
+같은 내용을 **블록 arm**으로 바꿔 내부 값을 const로 호이스팅하면 전부 정상
+(식 arm 안 파이프라인은 정상).
+
+---
+
 ## 진단 건전성 프로브 (전부 정상)
 
 "잡아야 할 오류를 실제로 잡는가"를 네거티브 프로브로 확인했다 —
@@ -743,3 +788,20 @@ readonly opening: TResult<number, string> = openingOf();
 - **let-else 발산 검사** — if/else 양갈래 return, try/catch 양쪽 throw를
   발산으로 정확히 인정; 발산하지 않는 else는 정확히 거부
 - **리터럴 패턴의 이스케이프**(`"\n"`, `"\""`, `"\\"`)와 arm 사이 주석 정상
+
+7~9차(미세 조합·수렴) 라운드 — 78개 테스트. 새로 확인한 정상 동작:
+
+- 한 문장의 두 match 이항 결합, 옵셔널 호출/인덱스 파이프 스텝(`?.()`,
+  `?.[]`), flow 단일 스텝, 한글 문자열·`1_000` 구분자·bigint 리터럴 패턴
+- 객체 리터럴 arm(`A => ({ n: 1 })`), 모듈 최상위 let-else(throw 발산),
+  네임스페이스 is 패턴(`is errs.Timeout { message: detail }`)
+- 3단 if let 체인, if let 본문의 result 블록+try, C-style for 조건의 match,
+  일반 함수 템플릿 보간의 match, 식 arm 안 파이프라인
+- do/while 조건의 match와 arm 밖 labeled break는 정확한 진단으로 거부
+  (`match-placement` 평가 횟수 설명 / `match-control-crossing`)
+- `ttc --types src` 사이드카 생성 정상
+
+**수렴 관찰**: 개별 구문·문 위치 합성·진단 시스템은 견고하다. 남은 결함은
+전부 "**식 위치에 값 영역을 직접 중첩**"하는 조합(이슈 2·6·7·10·12·14·16)과
+그 인접 ICE에 몰려 있고, 실무 우회는 한 가지로 통한다:
+**한 번 const/헬퍼로 뽑아 문 위치를 거쳐 가라.**

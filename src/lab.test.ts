@@ -6,8 +6,14 @@ import {
   Cart,
   Shape,
   Tree,
+  bigLabel,
+  callMaybe,
   charClass,
   countdown,
+  doubleFlip,
+  lookup,
+  optSum,
+  wonOf,
   errorKind,
   halves,
   orDefault,
@@ -148,6 +154,36 @@ describe("추가 조합: while 조건 match, is or-패턴, kind 유니언", () =
   it("variant 없이 손으로 쓴 kind 유니언에도 match", () => {
     expect(paymentLabel({ kind: "Card", last4: "1234" })).toBe("카드 **1234");
     expect(paymentLabel({ kind: "Cash" })).toBe("현금");
+  });
+});
+
+describe("미세 조합: 중첩 스크루티니, 한 문장 두 match, 옵셔널 스텝, 리터럴 경계", () => {
+  it("match 스크루티니 안의 match (이중 flip = 원상복귀)", () => {
+    expect(doubleFlip("on")).toBe("on");
+    expect(doubleFlip("off")).toBe("off");
+  });
+
+  it("한 문장에서 두 match를 이항 결합", () => {
+    expect(optSum(Option.Some(3), Option.Some(4))).toBe(7);
+    expect(optSum(Option.None, Option.Some(4))).toBe(4);
+    expect(optSum(Option.None, Option.None)).toBe(0);
+  });
+
+  it("옵셔널 호출 스텝 ?.()과 인덱스 스텝 ?.[]", () => {
+    expect(callMaybe((n) => n * 2)).toBe(6);
+    expect(callMaybe(undefined)).toBe(-1);
+    expect(lookup({ a: 5 }, "a")).toBe(5);
+    expect(lookup(undefined, "a")).toBe(-1);
+    expect(lookup({ a: 5 }, "b")).toBe(-1);
+  });
+
+  it("한글 문자열 패턴, 숫자 구분자, bigint 패턴", () => {
+    expect(wonOf("천원")).toBe(1000);
+    expect(wonOf("만원")).toBe(10000);
+    expect(wonOf("달러")).toBe(0);
+    expect(bigLabel(0n)).toBe("영");
+    expect(bigLabel(1n)).toBe("일");
+    expect(bigLabel(9n)).toBe("많음");
   });
 });
 
