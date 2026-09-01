@@ -1,0 +1,66 @@
+import type { TResult } from "@tt/std";
+import * as Result from "@tt/std/result";
+
+export type Todo = {
+  id: number;
+  text: string;
+  done: boolean;
+};
+
+export variant Filter {
+  All,
+  Active,
+  Completed,
+}
+
+export variant TodoError {
+  Empty,
+  TooLong(limit: number),
+  Duplicate(text: string),
+}
+
+const MAX_LENGTH = 80;
+
+export const parseTodo = (
+  raw: string,
+  todos: readonly Todo[],
+): TResult<string, TodoError> => {
+  const text = raw |> .trim();
+  if (text.length === 0) return Result.Err(TodoError.Empty);
+  if (text.length > MAX_LENGTH) return Result.Err(TodoError.TooLong(MAX_LENGTH));
+  if (todos.some((todo) => todo.text === text))
+    return Result.Err(TodoError.Duplicate(text));
+  return Result.Ok(text);
+};
+
+export const describeError = (error: TodoError): string =>
+  match (error) {
+    Empty => "할 일을 입력해 주세요.",
+    TooLong(limit) => `할 일은 ${limit}자 이내로 입력해 주세요.`,
+    Duplicate(text) => `"${text}"은(는) 이미 목록에 있어요.`,
+  };
+
+export const visibleTodos = (
+  todos: readonly Todo[],
+  filter: Filter,
+): readonly Todo[] =>
+  match (filter) {
+    All => todos,
+    Active => todos.filter((todo) => !todo.done),
+    Completed => todos.filter((todo) => todo.done),
+  };
+
+export const filterLabel = (filter: Filter): string =>
+  match (filter) {
+    All => "전체",
+    Active => "진행 중",
+    Completed => "완료",
+  };
+
+export const summary = (todos: readonly Todo[]): string => {
+  const remaining = todos.filter((todo) => !todo.done).length;
+  return match (remaining) {
+    0 => "모두 완료! 🎉",
+    _ => `${remaining}개 남음`,
+  };
+};

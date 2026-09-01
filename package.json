@@ -1,0 +1,24 @@
+{
+  "name": "tt-demo",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "ttc --check-types src && vite build",
+    "check": "ttc --check-types src",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@openload28/tt-lang": "next",
+    "@openload28/unplugin-tt": "next",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "7.1.0-dev.20260826.1",
+    "vite": "^8.0.0"
+  }
+}

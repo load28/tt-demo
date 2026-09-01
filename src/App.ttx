@@ -1,0 +1,130 @@
+import { useState, type FormEvent } from "react";
+import type { TOption } from "@tt/std";
+import * as Option from "@tt/std/option";
+
+import {
+  Filter,
+  TodoError,
+  type Todo,
+  describeError,
+  filterLabel,
+  parseTodo,
+  summary,
+  visibleTodos,
+} from "./todo.tt";
+
+val const FILTERS: readonly Filter[] = [
+  Filter.All,
+  Filter.Active,
+  Filter.Completed,
+];
+
+let nextId = 1;
+
+export default function App() {
+  const [todos, setTodos] = useState<readonly Todo[]>([]);
+  const [draft, setDraft] = useState("");
+  const [filter, setFilter] = useState<Filter>(Filter.All);
+  const [error, setError] = useState<TOption<TodoError>>(Option.None);
+
+  const addTodo = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    // ttc 현재 버전은 문(statement) 위치의 단독 match에서 ICE가 나므로 return으로 감쌉니다.
+    return match (parseTodo(draft, todos)) {
+      Ok(value: text) => {
+        setTodos([...todos, { id: nextId++, text, done: false }]);
+        setDraft("");
+        setError(Option.None);
+      },
+      Err(error: e) => {
+        setError(Option.Some(e));
+      },
+    };
+  };
+
+  const toggleTodo = (id: number) =>
+    setTodos(
+      todos.map((todo) =>
+        todo.id === id ? { ...todo, done: !todo.done } : todo,
+      ),
+    );
+
+  const removeTodo = (id: number) =>
+    setTodos(todos.filter((todo) => todo.id !== id));
+
+  const shown = visibleTodos(todos, filter);
+
+  // JSX 컨테이너 안에서 match를 직접 쓰면 현재 ttc가 앞 형제 요소를 잘못
+  // 로워링하므로(슬롯이 JSX 텍스트로 방출됨) return 전에 값으로 계산합니다.
+  const errorView = match (error) {
+    Some(value: e) => <p className="error">{describeError(e)}</p>,
+    None => null,
+  };
+
+  return (
+    <main className="app">
+      <h1>tt todo</h1>
+      <p className="tagline">
+        <code>variant</code> · <code>match</code> · <code>|&gt;</code> ·{" "}
+        <code>TResult</code>로 만든 투두 앱
+      </p>
+
+      <form className="add" onSubmit={addTodo}>
+        <input
+          value={draft}
+          onChange={(event) => {
+            setDraft(event.target.value);
+            setError(Option.None);
+          }}
+          placeholder="무엇을 해야 하나요?"
+          aria-label="새 할 일"
+        />
+        <button type="submit">추가</button>
+      </form>
+
+      {errorView}
+
+      <div className="filters" role="group" aria-label="필터">
+        {FILTERS.map((option) => (
+          <button
+            key={option.kind}
+            type="button"
+            className={option.kind === filter.kind ? "active" : ""}
+            onClick={() => setFilter(option)}
+          >
+            {filterLabel(option)}
+          </button>
+        ))}
+      </div>
+
+      <ul className="todos">
+        {shown.map((todo) => (
+          <li key={todo.id} className={todo.done ? "done" : ""}>
+            <label>
+              <input
+                type="checkbox"
+                checked={todo.done}
+                onChange={() => toggleTodo(todo.id)}
+              />
+              <span>{todo.text}</span>
+            </label>
+            <button
+              type="button"
+              className="remove"
+              onClick={() => removeTodo(todo.id)}
+              aria-label={`"${todo.text}" 삭제`}
+            >
+              ×
+            </button>
+          </li>
+        ))}
+      </ul>
+
+      {todos.length === 0 ? (
+        <p className="empty">아직 할 일이 없어요.</p>
+      ) : (
+        <p className="summary">{summary(todos)}</p>
+      )}
+    </main>
+  );
+}
