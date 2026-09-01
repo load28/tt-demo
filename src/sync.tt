@@ -3,7 +3,7 @@
  * match 스크루티니의 await, 가드의 await, arm 본문의 await,
  * if let 본문의 await, Result.fromPromise, is Error 패턴 분류.
  */
-import type { TOption } from "@tt/std";
+import type { TOption, TResult } from "@tt/std";
 import * as Result from "@tt/std/result";
 
 export variant SyncState {
@@ -59,6 +59,32 @@ export const syncWithRetry = async (
     }
   }
   return SyncState.Failed("시도 없이 종료", 0);
+};
+
+/** reject 값을 문자열 오류로 강등해 Result로. */
+const settledNumber = async (
+  work: Promise<number>,
+): Promise<TResult<number, string>> =>
+  match (await Result.fromPromise(work)) {
+    Ok(value) => Result.Ok(value),
+    Err(error) => Result.Err(classifyFailure(error)),
+  };
+
+/**
+ * async 함수 본문의 result 블록 + `try await` 조합.
+ * async 화살표의 concise 본문(`async () => result { ... }`)은 result 블록이
+ * 클레임되지 않으므로(이슈 #9) 블록 본문으로 감싼다.
+ */
+export const sumRemote = async (
+  first: () => Promise<number>,
+  second: () => Promise<number>,
+): Promise<TResult<number, string>> => {
+  const summed = result {
+    const a = try await settledNumber(first());
+    const b = try await settledNumber(second());
+    return a + b;
+  };
+  return summed;
 };
 
 /** 가드 안의 await — 검증이 통과한 캐시만 쓰고, 아니면 폐기. */

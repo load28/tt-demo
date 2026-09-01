@@ -5,6 +5,9 @@ import * as Result from "@tt/std/result";
 import {
   Shape,
   Tree,
+  countdown,
+  errorKind,
+  paymentLabel,
   baseSize,
   computeBudget,
   computeBudgetFn,
@@ -119,6 +122,25 @@ describe("리터럴 match", () => {
     expect(httpClass(429, true)).toBe("포기");
     expect(httpClass(404, false)).toBe("없음");
     expect(httpClass(500, false)).toBe("그 외");
+  });
+});
+
+describe("추가 조합: while 조건 match, is or-패턴, kind 유니언", () => {
+  it("while 조건의 match가 매 반복 재평가됨", () => {
+    expect(countdown(3)).toEqual([3, 2, 1]);
+    expect(countdown(0)).toEqual([]);
+  });
+
+  it("타입 전용 is or-패턴이 부모 Error보다 먼저 걸림", () => {
+    expect(errorKind(new RangeError("r"))).toBe("범위/타입");
+    expect(errorKind(new TypeError("t"))).toBe("범위/타입");
+    expect(errorKind(new Error("일반 오류"))).toBe("일반 오류");
+    expect(errorKind("문자열")).toBe("알 수 없음");
+  });
+
+  it("variant 없이 손으로 쓴 kind 유니언에도 match", () => {
+    expect(paymentLabel({ kind: "Card", last4: "1234" })).toBe("카드 **1234");
+    expect(paymentLabel({ kind: "Cash" })).toBe("현금");
   });
 });
 

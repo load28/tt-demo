@@ -1,0 +1,45 @@
+/**
+ * JSX × tt 구문 조합 카나리아 — labx.test.ts가 renderToStaticMarkup으로
+ * 실제 마크업까지 검증합니다.
+ */
+import type { TOption } from "@tt/std";
+
+/* a) match가 첫 자식(앞 형제 없음)이고 뒤 형제가 있는 경우 —
+      이슈 #2(앞 형제 오컴파일)의 경계 확인 */
+export const StatusLine = ({ status }: { status: TOption<string> }) => (
+  <div className="status">
+    {match (status) {
+      Some(value: text) => <em>{text}</em>,
+      None => <em>대기</em>,
+    }}
+    <span>· 갱신됨</span>
+  </div>
+);
+
+/* b) JSX 속성 컨테이너 안의 match */
+export const LevelBadge = ({ level }: { level: number }) => (
+  <span
+    className={match (level) {
+      0 => "quiet",
+      1 | 2 => "warm",
+      _ => "hot",
+    }}
+  >
+    L{level}
+  </span>
+);
+
+/* c) 파이프라인은 JSX 컨테이너 안(자식·속성 모두)에서 로워링이 JSX를
+      망가뜨리므로(이슈 #10) 본문에서 계산해 값만 보간한다. */
+export const Shout = ({ raw }: { raw: string }) => {
+  const loud = raw |> .trim() |> .toUpperCase();
+  return <p>{loud}!</p>;
+};
+
+/* d) 컴포넌트 본문의 if let + 조기 return */
+export const MaybeCount = ({ count }: { count: TOption<number> }) => {
+  if let Some(value: n) = count {
+    return <b>{n}개</b>;
+  }
+  return <i>비어 있음</i>;
+};

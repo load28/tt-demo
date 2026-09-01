@@ -15,6 +15,8 @@
 | 6 | result 블록 안에서 값 형태 `try`를 식에 내장(`f(try g() * 1.1)`, `try (파이프라인)`) → ICE 또는 파싱 불가 TS | 빌드 실패 (SourceReordered ICE / verify-failed) | try를 const로 먼저 뽑기 |
 | 7 | result 블록을 `\|>` 파이프라인 헤드로 사용 → 성공 `return`이 함수 return으로 방출 | **조용한 의미 오컴파일** — 타입이 우연히 맞으면 무증상 | 파이프 대신 함수 인자/문 위치로 |
 | 8 | match 리터럴 arm 값이 반환 문맥 타입을 못 받아 string으로 widen | strict에서 타입 검사 실패 — 오탐(#3과 같은 뿌리) | arm 값에 `as const` |
+| 9 | `async () => result { ... }` — async 화살표의 concise 본문에서 result 블록이 클레임되지 않음 | 빌드 실패(source-not-typescript) — 동기 화살표는 정상 | 블록 본문으로 감싸 문 위치에 배치 |
+| 10 | JSX 컨테이너(자식·속성) 안의 `\|>` 파이프라인 → JSX를 관통하는 파싱 불가 TS | 빌드 실패(verify-failed) | 파이프라인을 본문에서 계산 후 값만 보간 |
 
 ---
 
@@ -488,6 +490,105 @@ arm 값에 `as const`(또는 `as Toggle`)를 붙여 리터럴 타입을 지킨�
 
 ---
 
+## 9. async 화살표의 concise 본문에서 result 블록이 클레임되지 않음
+
+`async (...) => result { ... }` 형태에서 `result`가 tt 블록으로 인식되지 않고
+식별자+블록으로 passthrough되어, TS로서 파싱 불가라는
+`source-not-typescript` 에러가 난다. **동기 화살표의 concise 본문
+(`() => result { ... }`)은 정상 클레임된다** — async 경로만 빠져 있다.
+
+### 재현
+
+```tt
+const g = (): TResult<number, string> => Result.Ok(1);
+
+// 실패: source-not-typescript ("Expected a semicolon", result { 위치)
+export const f = async (): Promise<TResult<number, string>> => result {
+  const x = try g();
+  return x + 1;
+};
+```
+
+### 우회
+
+블록 본문으로 감싸 result 블록을 문 위치에 둔다 — 이 형태에서는
+`try await`까지 포함해 정상 동작한다.
+
+```tt
+export const f = async (): Promise<TResult<number, string>> => {
+  const r = result {
+    const x = try await settled(first());
+    return x + 1;
+  };
+  return r;
+};
+```
+
+적용 위치: `src/sync.tt`의 `sumRemote`.
+
+---
+
+## 10. JSX 컨테이너 안의 `|>` 파이프라인 — JSX를 관통하는 로워링
+
+`.ttx`에서 JSX 자식/속성 expression container에 파이프라인을 쓰면, 파이프
+헤드의 시작을 JSX 요소 중간으로 오인해 `$tt_ap(...)` 래핑이 JSX 태그를
+관통한다. 자식·속성 위치, 함수·메서드 스텝 모두 동일하게 깨진다.
+자가 검증(verify-failed)이 빌드를 막는다.
+
+### 재현
+
+```ttx
+const up = (s: string) => s.toUpperCase();
+export const B = ({ raw }: { raw: string }) => <p>{raw |> up}</p>;
+```
+
+```
+error[verify-failed]: generated TypeScript failed to parse: Expected '</', got ')'.
+```
+
+생성물: `$tt_ap((<p>{raw), up}</p>)` — 래핑 시작이 `<p>` 앞, 스텝 삽입이
+컨테이너 중간.
+
+### 기대 동작
+
+컨테이너 안 표현식(`raw |> up`)만 `$tt_ap(raw, up)`으로 로워링되어야 한다.
+공식 가이드는 "JSX 자식과 속성 expression container 안에서 tt 구문을 사용할
+수 있다"고 명시한다. (match는 속성 컨테이너·앞 형제 없는 자식 위치에서
+정상이므로, 컨테이너 인식 자체가 아니라 파이프라인 로워링의 스팬 계산 문제.)
+
+### 우회
+
+파이프라인을 컴포넌트 본문에서 계산하고 JSX에는 값만 넣는다.
+
+```ttx
+const loud = raw |> .trim() |> .toUpperCase();
+return <p>{loud}!</p>;
+```
+
+적용 위치: `src/labx.ttx`의 `Shout`.
+
+---
+
+## 진단 건전성 프로브 (전부 정상)
+
+"잡아야 할 오류를 실제로 잡는가"를 네거티브 프로브로 확인했다 —
+**10종 모두 정확한 진단이 발화했고, 조용히 통과하는 구멍은 없었다.**
+
+| 프로브 | 결과 |
+|--------|------|
+| variant match 누락 arm | `match-not-exhaustive: missing "Blue"` |
+| 튜플 match 누락 조합 | `missing (B, B)` |
+| 가드 arm만으로 태그 커버 시도 | `missing "Some"` (가드는 커버로 안 침) |
+| 1-hop import variant의 누락 arm | `missing "Wait"` (imported from …) |
+| 유한 리터럴 유니언의 누락 케이스 | `--check-types`에서 발화 |
+| `val const arr` + `push` | `--check-types`에서 내장 뮤테이터 진단 |
+| val 경로 깊은 변이 (`s.a.b = 2`) | `val-mutation` |
+| 리터럴 중복 arm (`200` vs `0xc8`) | `match-duplicate-arm` (값 비교) |
+| or-패턴 바인딩 불일치 | `match-or-binding-mismatch` (어느 쪽이 다른지 명시) |
+| `_` arm이 마지막이 아님 | `match-wildcard-not-last` |
+
+---
+
 ## 문제 없었던 것들
 
 같은 세션에서 아래는 전부 문서대로 동작했다 (2차 확장에서 검증 범위를 크게 넓힘):
@@ -541,3 +642,15 @@ arm 값에 `as const`(또는 `as Toggle`)를 붙여 리터럴 타입을 지킨�
   `if let` 본문의 `await`, `Result.fromPromise` 재시도 상태 머신
 - **val 바인딩 → 같은 파일 val 파라미터 전달**, let-else + or-패턴,
   `if let` + 중첩 패턴(`Ok(value: Some(value: v))`)
+
+5차(JSX 조합·건전성) 라운드 — `src/labx.ttx` 추가, 67개 테스트:
+
+- **JSX 속성 컨테이너 안 match** (리터럴 or-패턴 포함) — 정상
+- **앞 형제 없는 자식 match + 뒤 형제** — 뒤 형제는 온전히 보존됨
+  (이슈 #2는 **앞** 형제 한정으로 확정)
+- **컴포넌트 본문의 if let + 조기 return** — 정상
+- **while 조건의 match** — 매 반복 재평가 계약 확인
+- **타입 전용 is or-패턴** (`is RangeError | is TypeError`) — 순서 계약 포함
+- **variant 없는 손글씨 kind 유니언 match** — 정상 (완전성은 미검사 계약대로)
+- **async 블록 본문의 result 블록 + `try await`** — 첫 Err에서 뒤 문장
+  미도달(단락)까지 확인 (concise 본문은 이슈 #9)

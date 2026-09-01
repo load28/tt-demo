@@ -170,6 +170,39 @@ export const radiusOrZero = (shape: Shape): number => {
   return radius;
 };
 
+/* 10-a. while 조건의 match — 매 반복 재평가되는 영역 */
+
+export const countdown = (start: number): readonly number[] => {
+  let n = start;
+  const seen: number[] = [];
+  while (match (n) { 0 => false, _ => true }) {
+    seen.push(n);
+    n -= 1;
+  }
+  return seen;
+};
+
+/* 10-b. 타입 전용 is or-패턴 (바인딩 없음) — 부모(Error)보다 앞에 배치 */
+
+export const errorKind = (error: unknown): string =>
+  match (error) {
+    is RangeError | is TypeError => "범위/타입",
+    is Error { message } => message,
+    _ => "알 수 없음",
+  };
+
+/* 10-c. variant 없이 손으로 쓴 kind 유니언에 대한 match */
+
+export type Payment =
+  | { kind: "Card"; last4: string }
+  | { kind: "Cash" };
+
+export const paymentLabel = (payment: Payment): string =>
+  match (payment) {
+    Card(last4) => `카드 **${last4}`,
+    Cash => "현금",
+  };
+
 /* 10. 리터럴 or-패턴 + 가드가 섞인 match */
 
 export const httpClass = (code: number, retried: boolean): string =>

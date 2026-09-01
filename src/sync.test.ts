@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 import * as Option from "@tt/std/option";
 
-import { SyncState, cachedOrFetch, describeSync, syncWithRetry } from "./sync.tt";
+import * as Result from "@tt/std/result";
+
+import {
+  SyncState,
+  cachedOrFetch,
+  describeSync,
+  sumRemote,
+  syncWithRetry,
+} from "./sync.tt";
 
 /** n번 실패 후 성공하는 포트 + 호출 기록. */
 const flakyPort = (failures: number, reject: () => unknown = () => new Error("네트워크 끊김")) => {
@@ -80,6 +88,29 @@ describe("cachedOrFetch — 가드 안의 await", () => {
     };
     expect(await cachedOrFetch(Option.None, validate, fresh)).toBe(99);
     expect(validated).toBe(false);
+  });
+});
+
+describe("sumRemote — async 본문의 result 블록 + try await", () => {
+  it("둘 다 성공하면 합산", async () => {
+    expect(await sumRemote(async () => 3, async () => 4)).toEqual(
+      Result.Ok(7),
+    );
+  });
+
+  it("첫 호출이 실패하면 그 Err로 종료 — 두 번째는 호출 안 됨", async () => {
+    let secondCalled = false;
+    const failing = async (): Promise<number> => {
+      throw new Error("첫 번째 실패");
+    };
+    const second = async () => {
+      secondCalled = true;
+      return 4;
+    };
+    expect(await sumRemote(failing, second)).toEqual(
+      Result.Err("첫 번째 실패"),
+    );
+    expect(secondCalled).toBe(false); // 첫 try가 Err로 블록을 빠져나가 두 번째 문장 미도달
   });
 });
 
