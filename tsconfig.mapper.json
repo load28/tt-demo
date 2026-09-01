@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Preserve",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "paths": {
+      "@tt/std": ["./.tt-types/tt/index.d.ts"],
+      "@tt/std/*": ["./.tt-types/tt/*.d.ts"]
+    }
+  },
+  "contentMappers": [
+    { "package": "@openload28/tt-lang", "extensions": [".tt", ".ttx"] }
+  ],
+  "include": ["src"]
+}

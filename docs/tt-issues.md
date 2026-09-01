@@ -23,6 +23,7 @@
 | 14 | match를 다른 match의 스크루티니에 직접 중첩 → 슬롯 이름(`$tt_m`) 충돌 | **조용한 오컴파일** — tt 검증 통과, `--check-types`는 ts2588, 런타임 TypeError | 내부 match를 const로 먼저 바인딩 |
 | 15 | 비교 연산식(`a < b`)이 튜플 match의 스크루티니 요소 → codegen ICE (괄호를 쳐도 동일) | 빌드 실패 ("switch variant alternative tests no constructor") | 비교식을 const로 뽑아 요소로 사용 |
 | 16 | 식 arm 안의 또 다른 tt 값 영역(템플릿 보간 안 match, 인자 위치 result 블록) → ICE | 빌드 실패 ("match reached expression emission without a host rewrite") | 블록 arm으로 바꾸고 내부 값을 호이스팅 |
+| 17 | contentMappers 경로(`tsc --runExternalCode`)에서 `@tt/std` 가상 모듈이 해석되지 않음 (TS2307 연쇄) | 문서와 불일치 — "no rootDirs/paths" 명시와 달리 std만 미제공 | `paths`를 `.tt-types` 사이드카로 지정 (`ttc --types` 선행) |
 
 ---
 
@@ -683,6 +684,43 @@ rewrite" ICE: 템플릿 보간 안의 match(`` A(n) => `${match (w) {...}}` ``),
 
 ---
 
+## 17. contentMappers 경로에서 `@tt/std` 미해석
+
+TS 7.1의 가상 매퍼 경로(`tsconfig` 최상위 `contentMappers` +
+`tsc --runExternalCode`)에서 `.tt`/`.ttx` **변환 자체는 정상 동작**하지만
+(`$tt_t3` 같은 생성 코드가 검사에 등장), `@tt/std`·`@tt/std/option` 등
+표준 라이브러리 가상 모듈은 해석되지 않아 프로젝트 전체에 TS2307과 unknown
+연쇄가 난다. 가이드는 이 경로에 "no files on disk, no rootDirs/paths"라고
+안내하지만 실제로는 std만 빠져 있다.
+
+### 재현
+
+```sh
+bunx tsc -p tsconfig.mapper.json --runExternalCode
+# → error TS2307: Cannot find module '@tt/std' … (모든 import 지점)
+```
+
+### 우회
+
+사이드카를 만들고(`bunx ttc --types src`) `paths`로 연결하면 **전체 무진단
+통과**한다 — 이 저장소의 `tsconfig.mapper.json`이 그 형태다.
+
+```jsonc
+"paths": {
+  "@tt/std": ["./.tt-types/tt/index.d.ts"],
+  "@tt/std/*": ["./.tt-types/tt/*.d.ts"]
+}
+```
+
+### 부수 관찰 (경미)
+
+variant에 중복 케이스가 있으면(그 자체는 `variant-duplicate-case`로 정확히
+진단됨) importer의 비완전성 메시지가 `missing "Wait", "Wait"`처럼 중복
+이름을 나열하고 도움말도 같은 arm을 두 번 제안한다 — missing 목록의 중복
+제거 누락.
+
+---
+
 ## 진단 건전성 프로브 (전부 정상)
 
 "잡아야 할 오류를 실제로 잡는가"를 네거티브 프로브로 확인했다 —
@@ -805,3 +843,22 @@ rewrite" ICE: 템플릿 보간 안의 match(`` A(n) => `${match (w) {...}}` ``),
 전부 "**식 위치에 값 영역을 직접 중첩**"하는 조합(이슈 2·6·7·10·12·14·16)과
 그 인접 ICE에 몰려 있고, 실무 우회는 한 가지로 통한다:
 **한 번 const/헬퍼로 뽑아 문 위치를 거쳐 가라.**
+
+10차(툴체인 경로) 라운드 — 컴파일러 외곽의 4개 경로 검증:
+
+- **AOT 방출** (`ttc -o --rewrite-imports ts`) — 상대 `.tt`→`.ts`는 물론
+  passthrough `.ts` 테스트 파일 안의 `@tt/std` import까지 `./tt/*.ts`로
+  재작성, std 트리 물질화. **방출 트리로 78개 테스트 전부 통과** — 번들러
+  경로와 의미 동일 확인
+- **소스맵** (`--source-map file`) — 매핑을 VLQ 디코드로 검증: 생성 431행 →
+  `../src/lab.tt` 309행(`throw` 위치)으로 **정확히** 매핑. (bun은 외부 맵을
+  체이닝하지 않으므로 런타임 스택 확인은 node+js 경로 필요)
+- **contentMappers** — 변환은 정상, `@tt/std`만 미해석 (이슈 #17, paths
+  우회로 전체 무진단)
+- **watch** (`ttc -w`) — dep의 variant에 케이스 추가 시 importer가 자동
+  재컴파일되어 비완전성 오류+붙여넣기 가능한 arm 제안 출력 (크로스 파일
+  완전성 계약 확인)
+- `ttc explain <code>`/`ttc help <topic>` 오프라인 문서 정상
+
+미탐사로 남긴 것: VS Code 확장(VSIX — 이 환경에 에디터 없음), Verdaccio
+로컬 레지스트리 배포 경로, cargo 빌드.
