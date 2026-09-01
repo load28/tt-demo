@@ -3,11 +3,18 @@ import * as Option from "@tt/std/option";
 import * as Result from "@tt/std/result";
 
 import {
+  Cart,
   Shape,
   Tree,
+  charClass,
   countdown,
   errorKind,
+  halves,
+  orDefault,
+  orThrow,
+  parsedName,
   paymentLabel,
+  statusLines,
   baseSize,
   computeBudget,
   computeBudgetFn,
@@ -141,6 +148,49 @@ describe("추가 조합: while 조건 match, is or-패턴, kind 유니언", () =
   it("variant 없이 손으로 쓴 kind 유니언에도 match", () => {
     expect(paymentLabel({ kind: "Card", last4: "1234" })).toBe("카드 **1234");
     expect(paymentLabel({ kind: "Cash" })).toBe("현금");
+  });
+});
+
+describe("클래스·제너레이터·특수 위치", () => {
+  it("클래스 필드의 result 값(헬퍼 경유, 이슈 #12 우회)과 메서드·게터 match", () => {
+    const cart = new Cart();
+    expect(cart.opening).toEqual(Result.Ok(20));
+    expect(cart.label).toBe("빈 카트");
+    expect(cart.add(2)).toEqual(Option.Some(1));
+    expect(cart.add(-1)).toEqual(Option.None);
+    expect(cart.label).toBe("1개");
+  });
+
+  it("제너레이터: for(val const) + match 헬퍼(이슈 #11 우회)", () => {
+    expect([...statusLines([200, 404])]).toEqual(["정상", "오류 404"]);
+  });
+
+  it("제너레이터: yield 피연산자의 result 값(헬퍼 경유)", () => {
+    expect([...halves([4, 3])]).toEqual([Result.Ok(3), Result.Err("홀수")]);
+  });
+
+  it("catch (val e) + is 패턴 match", () => {
+    expect(parsedName('{"name":"김밥"}')).toBe("김밥");
+    expect(parsedName("{}")).toBe("무명");
+    expect(parsedName("{깨짐")).toMatch(/JSON/);
+  });
+
+  it("이스케이프 리터럴 패턴과 arm 사이 주석", () => {
+    expect(charClass("\n")).toBe("개행");
+    expect(charClass('"')).toBe("따옴표");
+    expect(charClass("\\")).toBe("역슬래시");
+    expect(charClass("a")).toBe("기타");
+  });
+
+  it("let-else: if/else 양갈래 return이 발산으로 인정", () => {
+    expect(orDefault(Option.Some(5), 9)).toBe(6);
+    expect(orDefault(Option.None, 9)).toBe(9);
+    expect(orDefault(Option.None, -1)).toBe(0);
+  });
+
+  it("let-else: try/catch 양쪽 throw가 발산으로 인정", () => {
+    expect(orThrow(Option.Some(3))).toBe(3);
+    expect(() => orThrow(Option.None)).toThrow("래핑");
   });
 });
 

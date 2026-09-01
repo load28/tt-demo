@@ -203,6 +203,115 @@ export const paymentLabel = (payment: Payment): string =>
     Cash => "현금",
   };
 
+/* 10-d. 클래스 본문: 필드 초기화식의 result 블록, 메서드·게터의 match */
+
+// 클래스 필드·yield 피연산자처럼 식 전용 위치의 result 블록은 로워링 말미의
+// 도달 불가 `return Ok(undefined)` 안전망이 반환 유니언을 오염시켜 ts2322
+// 오탐이 나므로(이슈 #12) 헬퍼 함수로 추출한다.
+const openingOf = (): TResult<number, string> => result {
+  const n = try half(4);
+  return n * 10;
+};
+
+export class Cart {
+  readonly opening: TResult<number, string> = openingOf();
+
+  private items: number[] = [];
+
+  add(n: number): TOption<number> {
+    return match (Option.fromNullable(n > 0 ? n : null)) {
+      Some(value: v) => {
+        this.items.push(v);
+        return Option.Some(this.items.length);
+      },
+      None => Option.None,
+    };
+  }
+
+  get label(): string {
+    return match (this.items.length) {
+      0 => "빈 카트",
+      _ => `${this.items.length}개`,
+    };
+  }
+}
+
+/* 10-e. 제너레이터: yield 피연산자의 match와 result 블록, for(val const) */
+
+// 제너레이터 본문에서는 문 위치의 match도 전부 match-placement로 거부되므로
+// (이슈 #11 — if let·파이프라인·let-else는 허용되는데 match만 전면 거부)
+// match를 일반 함수로 추출한다.
+const statusLineOf = (val code: number): string =>
+  match (code) {
+    200 => "정상",
+    _ => `오류 ${code}`,
+  };
+
+export function* statusLines(codes: readonly number[]): Generator<string> {
+  for (val const code of codes) {
+    yield statusLineOf(code);
+  }
+}
+
+const halfPlus = (n: number): TResult<number, string> => result {
+  const h = try half(n);
+  return h + 1;
+};
+
+export function* halves(
+  ns: readonly number[],
+): Generator<TResult<number, string>> {
+  for (const n of ns) {
+    yield halfPlus(n); // yield 피연산자의 result 블록도 이슈 #12 → 헬퍼로
+  }
+}
+
+/* 10-f. catch (val e) + match, 이스케이프 리터럴 패턴과 arm 사이 주석 */
+
+export const parsedName = (raw: string): string => {
+  try {
+    return (JSON.parse(raw) as { name?: string }).name ?? "무명";
+  } catch (val e) {
+    return match (e) {
+      is SyntaxError { message } => message,
+      _ => "알 수 없는 오류",
+    };
+  }
+};
+
+export const charClass = (ch: string): string =>
+  match (ch) {
+    "\n" => "개행", // 개행 문자 — arm 뒤 주석
+    "\"" => "따옴표",
+    /* 블록 주석도 arm 사이에 */
+    "\\" => "역슬래시",
+    _ => "기타",
+  };
+
+/* 10-g. let-else의 발산 else — if/else 양갈래 return, try/catch 양쪽 throw */
+
+export const orDefault = (o: TOption<number>, fallback: number): number => {
+  const Some(value: v) = o else {
+    if (fallback >= 0) {
+      return fallback;
+    } else {
+      return 0;
+    }
+  };
+  return v + 1;
+};
+
+export const orThrow = (o: TOption<number>): number => {
+  const Some(value: v) = o else {
+    try {
+      throw new Error("값이 없습니다");
+    } catch (cause) {
+      throw new Error("래핑", { cause });
+    }
+  };
+  return v;
+};
+
 /* 10. 리터럴 or-패턴 + 가드가 섞인 match */
 
 export const httpClass = (code: number, retried: boolean): string =>

@@ -17,6 +17,8 @@
 | 8 | match 리터럴 arm 값이 반환 문맥 타입을 못 받아 string으로 widen | strict에서 타입 검사 실패 — 오탐(#3과 같은 뿌리) | arm 값에 `as const` |
 | 9 | `async () => result { ... }` — async 화살표의 concise 본문에서 result 블록이 클레임되지 않음 | 빌드 실패(source-not-typescript) — 동기 화살표는 정상 | 블록 본문으로 감싸 문 위치에 배치 |
 | 10 | JSX 컨테이너(자식·속성) 안의 `\|>` 파이프라인 → JSX를 관통하는 파싱 불가 TS | 빌드 실패(verify-failed) | 파이프라인을 본문에서 계산 후 값만 보간 |
+| 11 | 제너레이터 본문에서는 문 위치의 `const x = match`조차 전부 `match-placement`로 거부 | 기능 공백 — match만 제너레이터에서 사용 불가 (if let·파이프라인·let-else는 허용) | match를 일반 함수로 추출 |
+| 12 | 식 전용 위치(클래스 필드·yield 피연산자)의 result 블록 → 말미 안전망 `return Ok(undefined)`이 반환 유니언 오염, ts2322 오탐 | strict에서 타입 검사 실패 — 오탐(코드는 건전함) | result 블록을 헬퍼 함수로 추출 |
 
 ---
 
@@ -569,6 +571,73 @@ return <p>{loud}!</p>;
 
 ---
 
+## 11. 제너레이터 본문에서 match 전면 거부
+
+제너레이터(`function*`) 본문에서는 가장 평범한 문 위치의 match
+(`const line = match (code) { ... };`)조차 `match-placement`
+("no sound statement region")로 거부된다. 루프 유무·`yield`와의 거리와
+무관하게 본문 전체가 거부 대상이다. 반면 **if let·let-else·파이프라인은
+제너레이터 안에서 정상 동작**하고, 문서도 "arm 안의 `yield`는 arm 내부 제어
+흐름만 겨냥할 수 있다"고 말해 match가 제너레이터에서 쓰이는 것을 전제한다 —
+과도한 보수적 거부로 보인다.
+
+### 재현
+
+```tt
+export function* f(code: number): Generator<string> {
+  const line = match (code) { 200 => "ok", _ => "err" };  // match-placement
+  yield line;
+}
+```
+
+### 우회
+
+match를 일반 함수로 추출해 호출만 한다. (`val` 바인딩을 넘기면 파라미터에도
+`val`이 필요하다 — `val-pass` 규칙은 정상 동작.)
+
+```tt
+const statusLineOf = (val code: number): string =>
+  match (code) { 200 => "정상", _ => `오류 ${code}` };
+```
+
+적용 위치: `src/lab.tt`의 `statusLines`/`statusLineOf`.
+
+---
+
+## 12. 식 전용 위치의 result 블록 — 말미 안전망이 반환 유니언을 오염
+
+클래스 필드 초기화식·제너레이터 `yield` 피연산자처럼 **식 전용 owner**에서
+result 블록은 `$tt_expr(() => { ... })` 경계로 로워링되는데, 콜백 끝에
+도달 불가 안전망 `return { kind: "Ok" as const, value: undefined };`가 항상
+붙는다. 블록의 모든 경로가 이미 return해도 붙기 때문에 콜백 반환 타입이
+`... | { kind: "Ok"; value: undefined }`로 넓어지고, `TResult<number, string>`
+주석과 충돌하는 ts2322 오탐이 난다. (문 위치의 라벨-슬롯 로워링에는 이
+안전망이 없어 정상.)
+
+### 재현
+
+```tt
+export class C {
+  readonly v: TResult<number, string> = result {
+    const n = try g();
+    return n * 10;      // 모든 경로가 return하는데도
+  };                    // ts2322: expected TResult<number,string>, found …
+}
+```
+
+### 우회
+
+result 블록을 헬퍼 함수로 추출하고 필드/yield에는 호출 결과만 둔다.
+
+```tt
+const openingOf = (): TResult<number, string> => result { ... };
+readonly opening: TResult<number, string> = openingOf();
+```
+
+적용 위치: `src/lab.tt`의 `openingOf`/`halfPlus`.
+
+---
+
 ## 진단 건전성 프로브 (전부 정상)
 
 "잡아야 할 오류를 실제로 잡는가"를 네거티브 프로브로 확인했다 —
@@ -586,6 +655,15 @@ return <p>{loud}!</p>;
 | 리터럴 중복 arm (`200` vs `0xc8`) | `match-duplicate-arm` (값 비교) |
 | or-패턴 바인딩 불일치 | `match-or-binding-mismatch` (어느 쪽이 다른지 명시) |
 | `_` arm이 마지막이 아님 | `match-wildcard-not-last` |
+| match를 파라미터 기본값에 | `match-placement` (경계 설명 포함) |
+| try를 모듈 최상위에 | `try-placement` (이유 설명 포함) |
+| let-else의 발산하지 않는 else | `let-else-not-diverging` |
+| flow 첫 스텝을 메서드 스텝으로 | `flow-first-step-method` |
+| 파이프 헤드의 괄호 없는 삼항식 | `stray-pipe` |
+| if let 뒤 일반 `else if (cond)` | `stray-if-let` |
+| 오타 케이스명 (`Circel`) | `unknown-case` + 유사 이름 제안 |
+| val 바인딩을 일반 파라미터로 전달 | `val-pass` |
+| `yield match (...)` | `match-placement` + 이동 제안 (계약대로) |
 
 ---
 
@@ -654,3 +732,14 @@ return <p>{loud}!</p>;
 - **variant 없는 손글씨 kind 유니언 match** — 정상 (완전성은 미검사 계약대로)
 - **async 블록 본문의 result 블록 + `try await`** — 첫 Err에서 뒤 문장
   미도달(단락)까지 확인 (concise 본문은 이슈 #9)
+
+6차(클래스·제너레이터·CFG) 라운드 — 74개 테스트:
+
+- **클래스 본문** — 메서드의 match(+`this` 변이), 게터의 리터럴 match 정상
+  (필드 초기화식의 result 블록은 이슈 #12)
+- **제너레이터** — `for (val const … of …)`, if let·let-else·파이프라인 정상
+  (match는 이슈 #11, yield 피연산자 result 블록은 이슈 #12)
+- **`catch (val e)`** + is 패턴 match 정상
+- **let-else 발산 검사** — if/else 양갈래 return, try/catch 양쪽 throw를
+  발산으로 정확히 인정; 발산하지 않는 else는 정확히 거부
+- **리터럴 패턴의 이스케이프**(`"\n"`, `"\""`, `"\\"`)와 arm 사이 주석 정상
